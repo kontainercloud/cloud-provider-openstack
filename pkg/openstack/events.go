@@ -20,8 +20,5 @@ const (
 	eventLBForceInternal               = "LoadBalancerForcedInternal"
 	eventLBExternalNetworkSearchFailed = "LoadBalancerExternalNetworkSearchFailed"
 	eventLBSourceRangesIgnored         = "LoadBalancerSourceRangesIgnored"
-	eventLBAZIgnored                   = "LoadBalancerAvailabilityZonesIgnored"
-	eventLBFloatingIPSkipped           = "LoadBalancerFloatingIPSkipped"
-	eventLBRename                      = "LoadBalancerRename"
-	eventLBLbMethodUnknown             = "LoadBalancerLbMethodUnknown"
+	eventLBAnnotationIgnored           = "LoadBalancerAnnotationIgnored"
 )

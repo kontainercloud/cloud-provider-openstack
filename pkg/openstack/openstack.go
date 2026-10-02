@@ -22,9 +22,11 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/gophercloud/gophercloud/v2"
+	"github.com/gophercloud/gophercloud/v2/openstack/identity/v3/tokens"
 	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/portsecurity"
 	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/trunk_details"
 	neutronports "github.com/gophercloud/gophercloud/v2/openstack/networking/v2/ports"
@@ -43,6 +45,8 @@ import (
 	"k8s.io/cloud-provider-openstack/pkg/client"
 	"k8s.io/cloud-provider-openstack/pkg/metrics"
 	"k8s.io/cloud-provider-openstack/pkg/util"
+	"k8s.io/cloud-provider-openstack/pkg/util/lbapi"
+	lbv1 "k8s.io/cloud-provider-openstack/pkg/util/lbapi/gen"
 	"k8s.io/cloud-provider-openstack/pkg/util/metadata"
 	openstackutil "k8s.io/cloud-provider-openstack/pkg/util/openstack"
 )
@@ -58,12 +62,6 @@ const (
 
 // userAgentData is used to add extra information to the gophercloud user-agent
 var userAgentData []string
-
-// supportedLBProvider map is used to define LoadBalancer providers that we support
-var supportedLBProvider = []string{"amphora", "octavia", "ovn", "f5", "amphorav2"}
-
-// supportedContainerStore map is used to define supported tls-container-ref store
-var supportedContainerStore = []string{"barbican", "external"}
 
 // AddExtraFlags is called by the main package to add component specific command line flags
 func AddExtraFlags(fs *pflag.FlagSet) {
@@ -82,17 +80,31 @@ type PortWithPortSecurity struct {
 
 // LoadBalancer is used for creating and maintaining load balancers
 type LoadBalancer struct {
-	secret        *gophercloud.ServiceClient
-	network       *gophercloud.ServiceClient
-	lb            *gophercloud.ServiceClient
+	network *gophercloud.ServiceClient
+	// lb is the client of the load balancer service.
+	lb lbapi.Interface
+	// tenantID is the OpenStack project the load balancers are created in.
+	tenantID      string
 	opts          LoadBalancerOpts
 	kclient       kubernetes.Interface
 	eventRecorder record.EventRecorder
 }
 
-// LoadBalancerOpts have the options to talk to Neutron LBaaSV2 or Octavia
+// LoadBalancerOpts have the options to talk to the load balancer service
 type LoadBalancerOpts struct {
-	Enabled                        bool                `gcfg:"enabled"`              // if false, disables the controller
+	Enabled          bool            `gcfg:"enabled"`            // if false, disables the controller
+	RPCServerAddr    string          `gcfg:"rpc-server-addr"`    // host:port or http://host:port of the load balancer service
+	APIKey           string          `gcfg:"api-key"`            // bearer token for the load balancer service, no credential is sent when empty
+	RPCTimeout       util.MyDuration `gcfg:"rpc-timeout"`        // deadline of a single RPC attempt
+	RPCRetryMax      int             `gcfg:"rpc-retry-max"`      // retries of an RPC that failed with a transient error
+	TenantID         string          `gcfg:"tenant-id"`          // overrides the project of the credentials in the [Global] section
+	VPCCIDR          string          `gcfg:"vpc-cidr"`           // address range of the VPC, needed when nodes are in other subnets than the load balancer
+	SecurityGroupIDs string          `gcfg:"security-group-ids"` // comma separated, applied to the load balancer's ports. Port security is disabled when empty
+	QoSPolicyID      string          `gcfg:"qos-policy-id"`      // QoS policy applied to the load balancer's ports. No QoS policy when empty
+
+	// The options below this line are the ones of the former Octavia
+	// implementation. Some keep their meaning, see ignoredLoadBalancerOpts for
+	// those that do not.
 	LBVersion                      string              `gcfg:"lb-version"`           // overrides autodetection. Only support v2.
 	SubnetID                       string              `gcfg:"subnet-id"`            // overrides autodetection.
 	MemberSubnetID                 string              `gcfg:"member-subnet-id"`     // overrides autodetection.
@@ -151,7 +163,9 @@ type RouterOpts struct {
 
 // OpenStack is an implementation of cloud provider Interface for OpenStack.
 type OpenStack struct {
-	provider              *gophercloud.ProviderClient
+	provider *gophercloud.ProviderClient
+	// projectID is the project the credentials are scoped to.
+	projectID             string
 	epOpts                *gophercloud.EndpointOpts
 	lbOpts                LoadBalancerOpts
 	routeOpts             RouterOpts
@@ -214,7 +228,9 @@ func ReadConfig(config io.Reader) (Config, error) {
 	cfg.LoadBalancer.NodeSelector = ""
 	cfg.LoadBalancer.LBProvider = "amphora"
 	cfg.LoadBalancer.LBMethod = "ROUND_ROBIN"
-	cfg.LoadBalancer.CreateMonitor = false
+	cfg.LoadBalancer.CreateMonitor = true
+	cfg.LoadBalancer.RPCTimeout = util.MyDuration{Duration: lbapi.DefaultTimeout}
+	cfg.LoadBalancer.RPCRetryMax = lbapi.DefaultRetryMax
 	cfg.LoadBalancer.ManageSecurityGroups = false
 	cfg.LoadBalancer.MonitorDelay = util.MyDuration{Duration: 5 * time.Second}
 	cfg.LoadBalancer.MonitorTimeout = util.MyDuration{Duration: 3 * time.Second}
@@ -252,15 +268,42 @@ func ReadConfig(config io.Reader) (Config, error) {
 		cfg.Metadata.SearchOrder = fmt.Sprintf("%s,%s", metadata.ConfigDriveID, metadata.MetadataID)
 	}
 
-	if !slices.Contains(supportedLBProvider, cfg.LoadBalancer.LBProvider) {
-		klog.Warningf("Unsupported LoadBalancer Provider: %s", cfg.LoadBalancer.LBProvider)
-	}
-
-	if !slices.Contains(supportedContainerStore, cfg.LoadBalancer.ContainerStore) {
-		klog.Warningf("Unsupported Container Store: %s", cfg.LoadBalancer.ContainerStore)
+	if ignored := ignoredLoadBalancerOpts(cfg); len(ignored) > 0 {
+		klog.Warningf("The following [LoadBalancer] options are set but have no effect, the load balancer service does not support them: %s", strings.Join(ignored, ", "))
 	}
 
 	return cfg, err
+}
+
+// ignoredLoadBalancerOpts returns the options of the former Octavia
+// implementation that are set in the config but no longer do anything.
+func ignoredLoadBalancerOpts(cfg Config) []string {
+	opts := cfg.LoadBalancer
+	var ignored []string
+	for name, set := range map[string]bool{
+		"lb-version":                         opts.LBVersion != "",
+		"lb-provider":                        opts.LBProvider != "" && opts.LBProvider != "amphora",
+		"member-subnet-id":                   opts.MemberSubnetID != "",
+		"floating-subnet-id":                 opts.FloatingSubnetID != "",
+		"floating-subnet":                    opts.FloatingSubnet != "",
+		"floating-subnet-tags":               opts.FloatingSubnetTags != "",
+		"cascade-delete":                     !opts.CascadeDelete,
+		"flavor-id":                          opts.FlavorID != "",
+		"availability-zone":                  opts.AvailabilityZone != "",
+		"max-shared-lb":                      opts.MaxSharedLB != 2,
+		"container-store":                    opts.ContainerStore != "" && opts.ContainerStore != "barbican",
+		"default-tls-container-ref":          opts.TlsContainerRef != "",
+		"provider-requires-serial-api-calls": opts.ProviderRequiresSerialAPICalls,
+	} {
+		if set {
+			ignored = append(ignored, name)
+		}
+	}
+	if len(cfg.LoadBalancerClass) > 0 {
+		ignored = append(ignored, "LoadBalancerClass sections")
+	}
+	slices.Sort(ignored)
+	return ignored
 }
 
 // caller is a tiny helper for conditional unwind logic
@@ -293,7 +336,8 @@ func NewOpenStack(cfg Config) (*OpenStack, error) {
 	provider.HTTPClient.Timeout = cfg.Metadata.RequestTimeout.Duration
 
 	os := OpenStack{
-		provider: provider,
+		provider:  provider,
+		projectID: projectIDFromProvider(provider, cfg.Global.TenantID),
 		epOpts: &gophercloud.EndpointOpts{
 			Region:       cfg.Global.Region,
 			Availability: cfg.Global.EndpointType,
@@ -314,6 +358,22 @@ func NewOpenStack(cfg Config) (*OpenStack, error) {
 	}
 
 	return &os, nil
+}
+
+// projectIDFromProvider returns the ID of the project the provider's token is
+// scoped to. The configured tenant ID is the fallback: it is empty when the
+// project is given by name or comes with an application credential.
+func projectIDFromProvider(provider *gophercloud.ProviderClient, configured string) string {
+	if provider != nil {
+		if result, ok := provider.GetAuthResult().(tokens.CreateResult); ok {
+			project, err := result.ExtractProject()
+			if err == nil && project != nil && project.ID != "" {
+				return project.ID
+			}
+			klog.V(2).Infof("Could not read the project from the Keystone token: %v", err)
+		}
+	}
+	return configured
 }
 
 // Instances v1 is no longer supported
@@ -350,29 +410,62 @@ func (os *OpenStack) LoadBalancer() (cloudprovider.LoadBalancer, bool) {
 		return nil, false
 	}
 
-	lb, err := client.NewLoadBalancerV2(os.provider, os.epOpts)
-	if err != nil {
-		klog.Fatalf("Failed to create an OpenStack LoadBalancer client: %v", err)
+	if os.lbOpts.RPCServerAddr == "" {
+		klog.Fatalf("Config error: rpc-server-addr is not set in the [LoadBalancer] section, the address of the load balancer service is required")
 		return nil, false
 	}
 
-	// keymanager client is optional
-	secret, err := client.NewKeyManagerV1(os.provider, os.epOpts)
-	if err != nil {
-		klog.Warningf("Failed to create an OpenStack Secret client: %v", err)
+	tenantID := os.lbOpts.TenantID
+	if tenantID == "" {
+		tenantID = os.projectID
 	}
-
-	// LBaaS v1 is deprecated in the OpenStack Liberty release.
-	// Currently kubernetes OpenStack cloud provider just support LBaaS v2.
-	lbVersion := os.lbOpts.LBVersion
-	if lbVersion != "" && lbVersion != "v2" {
-		klog.Fatalf("Config error: currently only support LBaaS v2, unrecognised lb-version \"%v\"", lbVersion)
+	if tenantID == "" {
+		klog.Fatalf("Config error: cannot determine the project of the load balancers, set tenant-id in the [LoadBalancer] section")
 		return nil, false
 	}
+
+	lb, err := lbapi.NewClient(lbapi.Config{
+		ServerAddr: os.lbOpts.RPCServerAddr,
+		APIKey:     os.lbOpts.APIKey,
+		Timeout:    os.lbOpts.RPCTimeout.Duration,
+		RetryMax:   os.lbOpts.RPCRetryMax,
+	})
+	if err != nil {
+		klog.Fatalf("Failed to create a load balancer service client: %v", err)
+		return nil, false
+	}
+	checkLoadBalancerService(lb, os.lbOpts.APIKey != "")
 
 	klog.V(1).Info("Claiming to support LoadBalancer")
 
-	return &LbaasV2{LoadBalancer{secret, network, lb, os.lbOpts, os.kclient, os.eventRecorder}}, true
+	return &LbaasV2{LoadBalancer{
+		network:       network,
+		lb:            lb,
+		tenantID:      tenantID,
+		opts:          os.lbOpts,
+		kclient:       os.kclient,
+		eventRecorder: os.eventRecorder,
+	}}, true
+}
+
+// checkLoadBalancerService probes the load balancer service once so that a
+// wrong address or API key shows up in the log at startup. It never fails the
+// startup: the service may simply come up later than this controller.
+func checkLoadBalancerService(lb lbapi.Interface, withAPIKey bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := lb.AuthenticatedPing(ctx, &lbv1.AuthenticatedPingRequest{})
+	switch {
+	case err != nil:
+		klog.Warningf("The load balancer service is not reachable or rejected the API key: %v", err)
+	case !resp.GetReady():
+		klog.Warningf("The load balancer service is not ready: %s", resp.GetMessage())
+	case withAPIKey && !resp.GetAuthEnforced():
+		klog.Warningf("The load balancer service does not enforce authentication, the configured api-key is not verified")
+	default:
+		klog.V(1).Info("The load balancer service is reachable")
+	}
 }
 
 // Zones indicates that we support zones

@@ -107,3 +107,10 @@ Generate string of enabled controllers. Might have a trailing comma (,) which ne
 {{- define "occm.enabledControllers" }}
 {{- range .Values.enabledControllers -}}{{ . }},{{- end -}}
 {{- end }}
+
+{{/*
+Path of the kubeconfig of the cluster the controller manages, when it does not run inside that cluster.
+*/}}
+{{- define "occm.kubeconfigPath" -}}
+{{- printf "%s/kubeconfig" (trimSuffix "/" .Values.kubeconfig.mountPath) -}}
+{{- end }}

@@ -2,6 +2,37 @@
 #
 # Define deployment mode for the controller and provide cloud credentials in cloudConfig at the end of the file
 #
+# The defaults run the controller inside the cluster it manages, as a DaemonSet
+# on the control plane nodes. To run it in another cluster instead (for example
+# a Cluster API management cluster that manages the workload cluster), see
+# ci/infra-values.yaml and the README.
+#
+
+# Kind of the controller workload: DaemonSet (default, one pod per selected node
+# of the managed cluster) or Deployment (for example when the controller runs in
+# a management cluster). Leader election makes sure only one pod is active.
+kind: DaemonSet
+
+# Number of pods when kind is Deployment.
+replicaCount: 1
+
+# Kubeconfig of the cluster the controller manages. Leave secretName empty when
+# the controller runs inside that cluster. When set, the Secret is mounted and
+# passed as --kubeconfig, --authentication-kubeconfig and
+# --authorization-kubeconfig. Cluster API stores the kubeconfig of a workload
+# cluster in the Secret <cluster-name>-kubeconfig under the key "value".
+kubeconfig:
+  secretName: ""
+  secretKey: value
+  mountPath: /etc/kubernetes/occm-kubeconfig
+
+# Create the ClusterRole, ClusterRoleBinding, Role and RoleBinding of the
+# controller. They grant the ServiceAccount access to the cluster the chart is
+# installed in, so they are not needed when kubeconfig.secretName points at
+# another cluster.
+rbac:
+  create: true
+
 ## Annotations to apply to all resources
 commonAnnotations: {}
 # commonAnnotations:
@@ -133,6 +164,17 @@ logVerbosityLevel: 2
 cloudConfig:
   global:
   networking:
+  # Load balancers are managed by the load balancer service. rpc-server-addr is
+  # required unless enabled is "false". For example:
+  #   rpc-server-addr: loadbalancer-api.lb-system.svc:8080
+  #   api-key: ""            # bearer token, no credential is sent when empty
+  #   tenant-id: ""          # defaults to the project of the [Global] credentials
+  #   subnet-id: ""          # defaults to the subnet of the first node
+  #   network-id: ""         # defaults to the network of subnet-id
+  #   floating-network-id: "" # defaults to the only external network
+  #   vpc-cidr: ""
+  #   security-group-ids: ""
+  #   qos-policy-id: ""
   loadBalancer:
   blockStorage:
   metadata:
