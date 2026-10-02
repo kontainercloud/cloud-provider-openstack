@@ -4,7 +4,7 @@
 apiVersion: apps/v1
 kind: {{ .Values.kind }}
 metadata:
-  name: {{ include "occm.name" . }}
+  name: {{ include "occm.fullname" . }}
   labels: {{- include "occm.labels.standard" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
   annotations:
@@ -51,7 +51,7 @@ spec:
       hostAliases:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      serviceAccountName: {{ .Values.serviceAccountName }}
+      serviceAccountName: {{ include "occm.serviceAccountName" . }}
       containers:
         - name: openstack-cloud-controller-manager
           image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
@@ -66,7 +66,7 @@ spec:
             - --cluster-name=$(CLUSTER_NAME)
             - --cloud-provider=openstack
             - --use-service-account-credentials=false
-            {{- if .Values.kubeconfig.secretName }}
+            {{- if .Values.kubeconfig.enabled }}
             - --kubeconfig={{ include "occm.kubeconfigPath" . }}
             - --authentication-kubeconfig={{ include "occm.kubeconfigPath" . }}
             - --authorization-kubeconfig={{ include "occm.kubeconfigPath" . }}
@@ -92,7 +92,7 @@ spec:
             name: http
             protocol: TCP
           {{- end }}
-          {{- if or (.Values.extraVolumeMounts) (.Values.secret.enabled) (.Values.kubeconfig.secretName) }}
+          {{- if or (.Values.extraVolumeMounts) (.Values.secret.enabled) (.Values.kubeconfig.enabled) }}
           volumeMounts:
           {{- end }}
           {{- if .Values.secret.enabled }}
@@ -100,7 +100,7 @@ spec:
               name: cloud-config-volume
               readOnly: true
           {{- end }}
-          {{- if .Values.kubeconfig.secretName }}
+          {{- if .Values.kubeconfig.enabled }}
             - mountPath: {{ .Values.kubeconfig.mountPath }}
               name: kubeconfig-volume
               readOnly: true
@@ -124,7 +124,7 @@ spec:
             - name: CLOUD_CONFIG
               value: /etc/config/cloud.conf
             - name: CLUSTER_NAME
-              value: {{ .Values.cluster.name }}
+              value: {{ include "occm.clusterName" . | quote }}
             {{- if .Values.extraEnv }}
               {{- toYaml .Values.extraEnv | nindent 12 }}
             {{- end }}
@@ -137,18 +137,18 @@ spec:
       priorityClassName: {{ .Values.priorityClassName }}
       {{- end }}
 
-      {{- if or (.Values.extraVolumes) (.Values.secret.enabled) (.Values.kubeconfig.secretName) }}
+      {{- if or (.Values.extraVolumes) (.Values.secret.enabled) (.Values.kubeconfig.enabled) }}
       volumes:
       {{- end }}
       {{- if .Values.secret.enabled }}
       - name: cloud-config-volume
         secret:
-          secretName: {{ .Values.secret.name }}
+          secretName: {{ include "occm.secretName" . }}
       {{- end }}
-      {{- if .Values.kubeconfig.secretName }}
+      {{- if .Values.kubeconfig.enabled }}
       - name: kubeconfig-volume
         secret:
-          secretName: {{ .Values.kubeconfig.secretName }}
+          secretName: {{ include "occm.kubeconfigSecretName" . }}
           items:
             - key: {{ .Values.kubeconfig.secretKey }}
               path: kubeconfig

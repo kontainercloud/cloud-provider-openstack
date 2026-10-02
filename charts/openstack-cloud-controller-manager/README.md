@@ -1,8 +1,13 @@
 # openstack-cloud-controller-manager
 
-Deploys the OpenStack Cloud Controller Manager to your cluster.
+Deploys the OpenStack Cloud Controller Manager.
 
-Default configuration values are the same as the CCM itself.
+By default the controller runs in a Cluster API management ("infra") cluster
+and manages one workload cluster from there: one release per workload cluster,
+installed into the namespace of its `Cluster` object. It reaches the workload
+cluster through the kubeconfig Secret Cluster API keeps for it, and OpenStack
+through `cloud.conf`. To run it inside the cluster it manages instead, see
+[Running inside the managed cluster](#running-inside-the-managed-cluster).
 
 ## How To install
 
@@ -19,13 +24,40 @@ You need to configure an `openstack-ccm.yaml` values file with at least:
 
 Health checks are attached to TCP listeners by default. Set `cloudConfig.loadBalancer.create-monitor: false` to turn them off.
 
-Then run:
+Then install a release named after the workload cluster, in the namespace of its `Cluster` object:
 
 ```sh
 helm repo add cpo https://kubernetes.github.io/cloud-provider-openstack
 helm repo update
-helm install openstack-ccm cpo/openstack-cloud-controller-manager --values openstack-ccm.yaml
+helm install mycluster cpo/openstack-cloud-controller-manager \
+  --namespace <cluster-namespace> --values openstack-ccm.yaml
 ```
+
+What the defaults give you:
+
+| Item | Default | Value to change it |
+| --- | --- | --- |
+| Workload | a `Deployment` with one pod, named after the release | `kind`, `replicaCount`, `fullnameOverride` |
+| Managed cluster | the release name, used for `--cluster-name` and so for load balancer names | `cluster.name` |
+| Kubeconfig | Secret `<cluster>-kubeconfig`, key `value`, created by Cluster API | `kubeconfig.secretName`, `kubeconfig.secretKey` |
+| Cloud config | Secret `<cluster>-cloud-config`, created from `cloudConfig` | `secret.name`, `secret.create` |
+| RBAC | none: the controller's permissions in the workload cluster come from the kubeconfig | `rbac.create` |
+| Controllers | `cloud-node`, `cloud-node-lifecycle`, `service` | `enabledControllers` |
+| Scheduling | any node, pod network, no priority class | `nodeSelector`, `tolerations`, `hostNetwork`, `priorityClassName` |
+
+Things to keep in mind:
+
+- `cluster.name` must be unique among the clusters that share an OpenStack project.
+- Pods in the management cluster must reach Keystone and the other OpenStack
+  endpoints, the load balancer service, and the workload cluster's API server.
+- The workload cluster's kubelets must run with `cloud-provider: external`, and
+  the workload cluster must not run its own copy of the controller.
+- The kubeconfig is read at startup. Cluster API rotates the client
+  certificate in `<cluster>-kubeconfig` before it expires; restart the
+  controller after a rotation, for example with a reloader.
+- Delete the workload cluster's `LoadBalancer` Services before deleting the
+  cluster, while the controller still runs, so that their load balancers are
+  removed. Uninstall the release after the cluster is gone.
 
 ## Using an external secret
 
@@ -41,59 +73,67 @@ secret:
 Create the secret with:
 
 ```sh
-kubectl create secret -n kube-system generic cloud-config --from-file=./cloud.conf
+kubectl create secret -n <cluster-namespace> generic cloud-config --from-file=./cloud.conf
 ```
 
-## Running in a management cluster
+## Running inside the managed cluster
 
-By default the chart runs the controller inside the cluster it manages: a
-DaemonSet on the control plane nodes, using the in-cluster credentials. The
-controller can also run in another cluster, for example the Cluster API
-management cluster that created the workload cluster. It then reaches the
-workload cluster through a kubeconfig and OpenStack through `cloud.conf`.
-
-Install one release per workload cluster, into the namespace of its `Cluster`
-object. `ci/infra-values.yaml` is a complete example; the values that matter:
-
-| Value | Setting | Why |
-| --- | --- | --- |
-| `kind` | `Deployment` | No per-node pods in the management cluster. Leader election keeps one active pod, its lease lives in the workload cluster. |
-| `kubeconfig.secretName` | `<cluster>-kubeconfig` | The Secret Cluster API keeps for the workload cluster. It is passed as `--kubeconfig`, `--authentication-kubeconfig` and `--authorization-kubeconfig`. |
-| `rbac.create` | `false` | The chart's RBAC would land in the management cluster. Permissions in the workload cluster come from the kubeconfig. |
-| `cluster.name` | the workload cluster's name | Load balancer names are derived from it and must not collide between clusters. |
-| `nameOverride`, `serviceAccountName` | unique per release | Needed when several releases share a namespace. |
-| `hostNetwork`, `dnsPolicy`, `nodeSelector`, `tolerations`, `priorityClassName`, `extraVolumes`, `extraVolumeMounts` | `false`, `ClusterFirst`, `null`, `[]`, `""`, `[]`, `[]` | The defaults target control plane nodes of the managed cluster. |
-| `enabledControllers` | `cloud-node`, `cloud-node-lifecycle`, `service` | The route controller needs `router-id` and `--cluster-cidr`. |
-
-```sh
-kubectl -n <cluster-namespace> create secret generic mycluster-cloud-config --from-file=cloud.conf
-helm install occm-mycluster cpo/openstack-cloud-controller-manager \
-  -n <cluster-namespace> -f ci/infra-values.yaml
-```
-
-Things to keep in mind:
-
-- Pods in the management cluster must reach Keystone and the other OpenStack
-  endpoints, the load balancer service, and the workload cluster's API server.
-- The workload cluster's kubelets must run with `cloud-provider: external`, and
-  the workload cluster must not run its own copy of the controller.
-- The kubeconfig is read at startup. Cluster API rotates the client
-  certificate in `<cluster>-kubeconfig` before it expires; restart the
-  controller after a rotation, for example with a reloader.
-- Delete the workload cluster's `LoadBalancer` Services before deleting the
-  cluster, while the controller still runs, so that their load balancers are
-  removed. Uninstall the release after the cluster is gone.
-
-## Tolerations
-
-To deploy OCCM to worker nodes only (e.g. when the controlplane is isolated), adjust the tolerations in the chart:
+To run the controller inside the cluster it manages, as a DaemonSet on the
+control plane nodes with the in-cluster credentials, use these values:
 
 ```yaml
+kind: DaemonSet
+kubeconfig:
+  enabled: false
+rbac:
+  create: true
+cluster:
+  name: kubernetes
+secret:
+  name: cloud-config
+serviceAccountName: cloud-controller-manager
+fullnameOverride: openstack-cloud-controller-manager
+hostNetwork: true
+dnsPolicy: ClusterFirstWithHostNet
+nodeSelector:
+  node-role.kubernetes.io/control-plane: ""
 tolerations:
   - key: node.cloudprovider.kubernetes.io/uninitialized
     value: "true"
     effect: NoSchedule
+  - key: node-role.kubernetes.io/control-plane
+    effect: NoSchedule
+priorityClassName: system-node-critical
+extraVolumes:
+  - name: flexvolume-dir
+    hostPath:
+      path: /usr/libexec/kubernetes/kubelet-plugins/volume/exec
+  - name: k8s-certs
+    hostPath:
+      path: /etc/kubernetes/pki
+extraVolumeMounts:
+  - name: flexvolume-dir
+    mountPath: /usr/libexec/kubernetes/kubelet-plugins/volume/exec
+    readOnly: true
+  - name: k8s-certs
+    mountPath: /etc/kubernetes/pki
+    readOnly: true
+enabledControllers:
+  - cloud-node
+  - cloud-node-lifecycle
+  - route
+  - service
 ```
+
+and install into `kube-system`:
+
+```sh
+helm install openstack-ccm cpo/openstack-cloud-controller-manager \
+  --namespace kube-system --values openstack-ccm.yaml --values in-cluster.yaml
+```
+
+To deploy OCCM to worker nodes only in this mode (e.g. when the controlplane is
+isolated), keep only the first toleration above.
 
 ## Unsupported configurations
 

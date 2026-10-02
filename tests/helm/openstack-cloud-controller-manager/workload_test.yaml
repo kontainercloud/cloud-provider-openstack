@@ -5,82 +5,58 @@ templates:
   - templates/clusterrolebinding.yaml
   - templates/role.yaml
   - templates/rolebinding.yaml
+  - templates/secret.yaml
+  - templates/serviceaccount.yaml
 
 release:
-  name: test-release
-  namespace: test-namespace
+  name: mycluster
+  namespace: capi-ns
 
 chart:
   version: 1.2.3
   appVersion: v4.5.6
 
 tests:
-  - it: runs as a DaemonSet in the managed cluster by default
+  - it: runs as a Deployment in the management cluster by default
     template: templates/daemonset.yaml
-    asserts:
-      - isKind:
-          of: DaemonSet
-      - equal:
-          path: spec.updateStrategy.type
-          value: RollingUpdate
-      - notExists:
-          path: spec.replicas
-      - equal:
-          path: spec.template.spec.hostNetwork
-          value: true
-      - notContains:
-          path: spec.template.spec.containers[0].args
-          content: --kubeconfig=/etc/kubernetes/occm-kubeconfig/kubeconfig
-      - notContains:
-          path: spec.template.spec.volumes
-          content:
-            name: kubeconfig-volume
-          any: true
-
-  - it: creates the RBAC objects by default
-    asserts:
-      - isKind:
-          of: ClusterRole
-        template: templates/clusterrole.yaml
-      - isKind:
-          of: ClusterRoleBinding
-        template: templates/clusterrolebinding.yaml
-      - isKind:
-          of: Role
-        template: templates/role.yaml
-      - isKind:
-          of: RoleBinding
-        template: templates/rolebinding.yaml
-
-  - it: runs as a Deployment
-    template: templates/daemonset.yaml
-    set:
-      kind: Deployment
-      replicaCount: 2
     asserts:
       - isKind:
           of: Deployment
       - equal:
+          path: metadata.name
+          value: mycluster
+      - equal:
           path: spec.replicas
-          value: 2
+          value: 1
       - equal:
           path: spec.strategy.type
           value: RollingUpdate
+      - equal:
+          path: spec.template.spec.hostNetwork
+          value: false
+      - equal:
+          path: spec.template.spec.dnsPolicy
+          value: ClusterFirst
       - notExists:
-          path: spec.updateStrategy
+          path: spec.template.spec.nodeSelector
+      - notExists:
+          path: spec.template.spec.tolerations
+      - notExists:
+          path: spec.template.spec.priorityClassName
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: mycluster
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --controllers=cloud-node,cloud-node-lifecycle,service
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CLUSTER_NAME
+            value: mycluster
 
-  - it: rejects an unknown kind
+  - it: reads the Cluster API kubeconfig of the workload cluster by default
     template: templates/daemonset.yaml
-    set:
-      kind: StatefulSet
-    asserts:
-      - failedTemplate:
-          errorMessage: kind must be DaemonSet or Deployment, got "StatefulSet"
-
-  - it: manages another cluster through a kubeconfig Secret
-    template: templates/daemonset.yaml
-    set:
-      kubeconfig.secretName: mycluster-kubeconfig
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
@@ -97,39 +73,31 @@ tests:
             mountPath: /etc/kubernetes/occm-kubeconfig
             name: kubeconfig-volume
             readOnly: true
-      - contains:
+      - equal:
           path: spec.template.spec.volumes
-          content:
-            name: kubeconfig-volume
-            secret:
-              secretName: mycluster-kubeconfig
-              items:
-                - key: value
-                  path: kubeconfig
+          value:
+            - name: cloud-config-volume
+              secret:
+                secretName: mycluster-cloud-config
+            - name: kubeconfig-volume
+              secret:
+                secretName: mycluster-kubeconfig
+                items:
+                  - key: value
+                    path: kubeconfig
 
-  - it: honours a custom kubeconfig key and mount path
-    template: templates/daemonset.yaml
-    set:
-      kubeconfig.secretName: mycluster-kubeconfig
-      kubeconfig.secretKey: admin.conf
-      kubeconfig.mountPath: /var/run/occm/
+  - it: names the cloud config Secret and the ServiceAccount after the cluster
     asserts:
-      - contains:
-          path: spec.template.spec.containers[0].args
-          content: --kubeconfig=/var/run/occm/kubeconfig
-      - contains:
-          path: spec.template.spec.volumes
-          content:
-            name: kubeconfig-volume
-            secret:
-              secretName: mycluster-kubeconfig
-              items:
-                - key: admin.conf
-                  path: kubeconfig
+      - equal:
+          path: metadata.name
+          value: mycluster-cloud-config
+        template: templates/secret.yaml
+      - equal:
+          path: metadata.name
+          value: mycluster
+        template: templates/serviceaccount.yaml
 
-  - it: skips the RBAC objects when disabled
-    set:
-      rbac.create: false
+  - it: creates no RBAC objects by default
     asserts:
       - hasDocuments:
           count: 0
@@ -144,10 +112,63 @@ tests:
           count: 0
         template: templates/rolebinding.yaml
 
+  - it: derives the Secret names from cluster.name
+    template: templates/daemonset.yaml
+    set:
+      cluster.name: prod-eu
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CLUSTER_NAME
+            value: prod-eu
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: kubeconfig-volume
+            secret:
+              secretName: prod-eu-kubeconfig
+              items:
+                - key: value
+                  path: kubeconfig
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: cloud-config-volume
+            secret:
+              secretName: prod-eu-cloud-config
+
+  - it: honours explicit kubeconfig settings
+    template: templates/daemonset.yaml
+    set:
+      kubeconfig.secretName: admin-kubeconfig
+      kubeconfig.secretKey: admin.conf
+      kubeconfig.mountPath: /var/run/occm/
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: --kubeconfig=/var/run/occm/kubeconfig
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: kubeconfig-volume
+            secret:
+              secretName: admin-kubeconfig
+              items:
+                - key: admin.conf
+                  path: kubeconfig
+
+  - it: rejects an unknown kind
+    template: templates/daemonset.yaml
+    set:
+      kind: StatefulSet
+    asserts:
+      - failedTemplate:
+          errorMessage: kind must be DaemonSet or Deployment, got "StatefulSet"
+
   - it: binds the metrics port to the node only for a DaemonSet
     template: templates/daemonset.yaml
     set:
-      kind: Deployment
       serviceMonitor.enabled: true
     asserts:
       - equal:
@@ -156,30 +177,50 @@ tests:
       - notExists:
           path: spec.template.spec.containers[0].ports[0].hostPort
 
-  - it: renders the management cluster example
-    template: templates/daemonset.yaml
-    values:
-      - ../../../charts/openstack-cloud-controller-manager/ci/infra-values.yaml
+  - it: runs inside the managed cluster with the documented values
+    set:
+      kind: DaemonSet
+      kubeconfig.enabled: false
+      rbac.create: true
+      cluster.name: kubernetes
+      secret.name: cloud-config
+      serviceAccountName: cloud-controller-manager
+      fullnameOverride: openstack-cloud-controller-manager
+      hostNetwork: true
     asserts:
       - isKind:
-          of: Deployment
+          of: DaemonSet
+        template: templates/daemonset.yaml
       - equal:
-          path: spec.template.spec.hostNetwork
-          value: false
+          path: spec.updateStrategy.type
+          value: RollingUpdate
+        template: templates/daemonset.yaml
       - notExists:
-          path: spec.template.spec.nodeSelector
-      - notExists:
-          path: spec.template.spec.tolerations
-      - notExists:
-          path: spec.template.spec.priorityClassName
-      - contains:
+          path: spec.replicas
+        template: templates/daemonset.yaml
+      - notContains:
           path: spec.template.spec.containers[0].args
-          content: --controllers=cloud-node,cloud-node-lifecycle,service
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: CLUSTER_NAME
-            value: mycluster
-      - lengthEqual:
+          content: --kubeconfig=/etc/kubernetes/occm-kubeconfig/kubeconfig
+        template: templates/daemonset.yaml
+      - equal:
           path: spec.template.spec.volumes
-          count: 2
+          value:
+            - name: cloud-config-volume
+              secret:
+                secretName: cloud-config
+        template: templates/daemonset.yaml
+      - equal:
+          path: spec.template.spec.serviceAccountName
+          value: cloud-controller-manager
+        template: templates/daemonset.yaml
+      - isKind:
+          of: ClusterRole
+        template: templates/clusterrole.yaml
+      - equal:
+          path: subjects[0].name
+          value: cloud-controller-manager
+        template: templates/clusterrolebinding.yaml
+      - contains:
+          path: rules[0].resourceNames
+          content: cloud-config
+        template: templates/role.yaml

@@ -6,6 +6,39 @@ Expand the name of the chart.
 {{- end -}}
 
 {{/*
+Name of the chart's objects: the release name, unless overridden. One release
+manages one cluster, so several releases can share a namespace.
+*/}}
+{{- define "occm.fullname" -}}
+{{- if .Values.fullnameOverride -}}
+{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else if .Values.nameOverride -}}
+{{- .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Name of the managed cluster.
+*/}}
+{{- define "occm.clusterName" -}}
+{{- default .Release.Name .Values.cluster.name -}}
+{{- end -}}
+
+{{- define "occm.serviceAccountName" -}}
+{{- default (include "occm.fullname" .) .Values.serviceAccountName -}}
+{{- end -}}
+
+{{- define "occm.secretName" -}}
+{{- default (printf "%s-cloud-config" (include "occm.clusterName" .)) .Values.secret.name -}}
+{{- end -}}
+
+{{- define "occm.kubeconfigSecretName" -}}
+{{- default (printf "%s-kubeconfig" (include "occm.clusterName" .)) .Values.kubeconfig.secretName -}}
+{{- end -}}
+
+{{/*
 Create chart name and version as used by the chart label.
 */}}
 {{- define "occm.chart" -}}
