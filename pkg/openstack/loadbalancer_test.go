@@ -2332,3 +2332,118 @@ func TestUpdateLoadBalancer(t *testing.T) {
 	assert.NotEqual(t, storedAnnotations(t, kclient)[ServiceAnnotationLoadBalancerConfigHash], svc.Annotations[ServiceAnnotationLoadBalancerConfigHash],
 		"the new hash is saved")
 }
+
+func TestGetHTTPConfig(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		want        *httpConfig
+		wantErr     string
+	}{
+		{name: "no annotation"},
+		{
+			name:        "catch-all",
+			annotations: map[string]string{ServiceAnnotationLoadBalancerHTTPPath: "/"},
+			want:        &httpConfig{pathPrefix: "/", monitorPath: "/", monitorMethod: lbv1.HttpMethod_HTTP_METHOD_GET, monitorExpected: []int32{200}},
+		},
+		{
+			name: "everything set",
+			annotations: map[string]string{
+				ServiceAnnotationLoadBalancerHTTPPath:                   "/api",
+				ServiceAnnotationLoadBalancerHTTPMethod:                 "post",
+				ServiceAnnotationLoadBalancerHTTPHostnames:              "app.example.com, *.example.org,app.example.com",
+				ServiceAnnotationLoadBalancerHealthMonitorHTTPPath:      "/healthz",
+				ServiceAnnotationLoadBalancerHealthMonitorHTTPMethod:    "HEAD",
+				ServiceAnnotationLoadBalancerHealthMonitorExpectedCodes: "200, 204",
+			},
+			want: &httpConfig{
+				pathPrefix:      "/api",
+				method:          lbv1.HttpMethod_HTTP_METHOD_POST,
+				hostnames:       []string{"app.example.com", "*.example.org"},
+				monitorPath:     "/healthz",
+				monitorMethod:   lbv1.HttpMethod_HTTP_METHOD_HEAD,
+				monitorExpected: []int32{200, 204},
+			},
+		},
+		{name: "relative path", annotations: map[string]string{ServiceAnnotationLoadBalancerHTTPPath: "api"}, wantErr: "must start with /"},
+		{name: "unknown method", annotations: map[string]string{ServiceAnnotationLoadBalancerHTTPPath: "/", ServiceAnnotationLoadBalancerHTTPMethod: "FETCH"}, wantErr: "unknown HTTP method"},
+		{name: "bad hostname", annotations: map[string]string{ServiceAnnotationLoadBalancerHTTPPath: "/", ServiceAnnotationLoadBalancerHTTPHostnames: "localhost"}, wantErr: "not a valid hostname"},
+		{name: "bad status code", annotations: map[string]string{ServiceAnnotationLoadBalancerHTTPPath: "/", ServiceAnnotationLoadBalancerHealthMonitorExpectedCodes: "200,600"}, wantErr: "not an HTTP status code"},
+		{name: "method without path", annotations: map[string]string{ServiceAnnotationLoadBalancerHTTPMethod: "GET"}, wantErr: "needs"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := newTestService()
+			svc.Annotations = tt.annotations
+			got, err := getHTTPConfig(svc)
+			if tt.wantErr != "" {
+				assert.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestBuildHTTPListeners(t *testing.T) {
+	svcConf := &serviceConfig{
+		algorithm:                   lbv1.Algorithm_ALGORITHM_ROUND_ROBIN,
+		enableMonitor:               true,
+		healthMonitorDelay:          5,
+		healthMonitorTimeout:        3,
+		healthMonitorMaxRetries:     1,
+		healthMonitorMaxRetriesDown: 3,
+		http: &httpConfig{
+			pathPrefix:      "/api",
+			method:          lbv1.HttpMethod_HTTP_METHOD_GET,
+			hostnames:       []string{"app.example.com"},
+			monitorPath:     "/healthz",
+			monitorMethod:   lbv1.HttpMethod_HTTP_METHOD_GET,
+			monitorExpected: []int32{200},
+		},
+	}
+
+	got, err := buildListeners(newTestService(), newTestNodes("10.0.0.11"), svcConf)
+	require.NoError(t, err)
+
+	http := got[0]
+	assert.Equal(t, lbv1.Protocol_PROTOCOL_HTTP, http.Protocol, "TCP ports become HTTP listeners")
+	assert.Equal(t, []string{"app.example.com"}, http.Hostnames)
+	assert.Equal(t, []*lbv1.HttpRouteMatch{{
+		Path:   &lbv1.HttpPathMatch{Type: lbv1.HttpPathType_HTTP_PATH_TYPE_PREFIX, Value: "/api"},
+		Method: lbv1.HttpMethod_HTTP_METHOD_GET,
+	}}, http.Rules[0].Matches)
+	assert.Equal(t, &lbv1.HealthMonitor{
+		Interval: 5, Timeout: 3, HealthyThreshold: 1, UnhealthyThreshold: 3,
+		HttpHealthCheckPath: "/healthz", HttpHealthCheckMethod: lbv1.HttpMethod_HTTP_METHOD_GET, ExpectedStatusCodes: []int32{200},
+	}, http.Rules[0].HealthMonitor)
+
+	udp := got[1]
+	assert.Equal(t, lbv1.Protocol_PROTOCOL_UDP, udp.Protocol, "UDP ports stay UDP")
+	assert.Empty(t, udp.Hostnames)
+	assert.Nil(t, udp.Rules[0].HealthMonitor)
+
+	svcConf.http = &httpConfig{pathPrefix: "/", monitorPath: "/", monitorMethod: lbv1.HttpMethod_HTTP_METHOD_GET, monitorExpected: []int32{200}}
+	got, err = buildListeners(newTestService(), newTestNodes("10.0.0.11"), svcConf)
+	require.NoError(t, err)
+	assert.Empty(t, got[0].Rules[0].Matches, "a catch-all rule carries no match")
+}
+
+func TestEnsureLoadBalancerSwitchesToHTTP(t *testing.T) {
+	client := newFakeLBClient()
+	svc := newTestService()
+	lbaas, _ := newTestLbaas(t, client, svc)
+	_, err := lbaas.EnsureLoadBalancer(context.Background(), testLBClusterName, svc, newTestNodes("10.0.0.11"))
+	require.NoError(t, err)
+
+	svc.Annotations[ServiceAnnotationLoadBalancerHTTPPath] = "/"
+	_, err = lbaas.EnsureLoadBalancer(context.Background(), testLBClusterName, svc, newTestNodes("10.0.0.11"))
+	require.NoError(t, err)
+
+	require.Len(t, client.updateReqs, 1)
+	http := client.updateReqs[0].Listeners[0]
+	assert.Equal(t, lbv1.Protocol_PROTOCOL_HTTP, http.Protocol)
+	assert.Empty(t, http.Id, "the TCP listener is replaced, not changed in place")
+	assert.NotEmpty(t, client.updateReqs[0].Listeners[1].Id, "the UDP listener is kept")
+}

@@ -11,5 +11,9 @@ tenant-id=
 domain-id=
 
 [LoadBalancer]
+# Address of the load balancer service, host:port or http://host:port
+rpc-server-addr=loadbalancer-api.lb-system.svc:8080
+# api-key=
 subnet-id=9c018814-f2a8-45dd-9679-5400d49b333a
+# internal-lb=true gives load balancers without floating IP, then floating-network-id is not needed
 floating-network-id=80c9fc78-a2be-45d5-a85b-f17a6c98df92

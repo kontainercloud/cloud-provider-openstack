@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -76,7 +78,22 @@ const (
 	ServiceAnnotationLoadBalancerHealthMonitorMaxRetries     = "loadbalancer.openstack.org/health-monitor-max-retries"
 	ServiceAnnotationLoadBalancerHealthMonitorMaxRetriesDown = "loadbalancer.openstack.org/health-monitor-max-retries-down"
 	ServiceAnnotationLoadBalancerLoadbalancerHostname        = "loadbalancer.openstack.org/hostname"
-	ServiceAnnotationLoadBalancerAddress                     = "loadbalancer.openstack.org/load-balancer-address"
+	// ServiceAnnotationLoadBalancerHTTPPath turns every TCP port of the Service into an HTTP listener. The value is a
+	// path prefix the listener matches; "/" matches every request.
+	ServiceAnnotationLoadBalancerHTTPPath = "loadbalancer.openstack.org/http-path"
+	// ServiceAnnotationLoadBalancerHTTPMethod restricts the HTTP listeners to one request method.
+	ServiceAnnotationLoadBalancerHTTPMethod = "loadbalancer.openstack.org/http-method"
+	// ServiceAnnotationLoadBalancerHTTPHostnames restricts the HTTP listeners to the given Host headers (comma-separated).
+	ServiceAnnotationLoadBalancerHTTPHostnames = "loadbalancer.openstack.org/http-hostnames"
+	// ServiceAnnotationLoadBalancerHealthMonitorHTTPPath is the path the health monitor of an HTTP listener requests.
+	// Defaults to the http-path annotation.
+	ServiceAnnotationLoadBalancerHealthMonitorHTTPPath = "loadbalancer.openstack.org/health-monitor-http-path"
+	// ServiceAnnotationLoadBalancerHealthMonitorHTTPMethod is the method of the HTTP health check. Defaults to GET.
+	ServiceAnnotationLoadBalancerHealthMonitorHTTPMethod = "loadbalancer.openstack.org/health-monitor-http-method"
+	// ServiceAnnotationLoadBalancerHealthMonitorExpectedCodes lists the status codes of a healthy backend
+	// (comma-separated). Defaults to 200.
+	ServiceAnnotationLoadBalancerHealthMonitorExpectedCodes = "loadbalancer.openstack.org/health-monitor-expected-codes"
+	ServiceAnnotationLoadBalancerAddress                    = "loadbalancer.openstack.org/load-balancer-address"
 	// revive:disable:var-naming
 	ServiceAnnotationTlsContainerRef = "loadbalancer.openstack.org/default-tls-container-ref"
 	// revive:enable:var-naming
@@ -177,7 +194,98 @@ type serviceConfig struct {
 	healthMonitorTimeout        int
 	healthMonitorMaxRetries     int
 	healthMonitorMaxRetriesDown int
+	http                        *httpConfig     // nil when the Service's TCP ports are plain TCP listeners
 	preferredIPFamily           corev1.IPFamily // preferred (the first) IP family indicated in service's `spec.ipFamilies`
+}
+
+// httpConfig is how the TCP ports of a Service are served when it asks for HTTP listeners.
+type httpConfig struct {
+	pathPrefix      string
+	method          lbv1.HttpMethod
+	hostnames       []string
+	monitorPath     string
+	monitorMethod   lbv1.HttpMethod
+	monitorExpected []int32
+}
+
+// hostnamePattern is the hostname the load balancer service accepts on a listener.
+var hostnamePattern = regexp.MustCompile(`^(\*\.)?([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$`)
+
+func parseHTTPMethod(method string) (lbv1.HttpMethod, error) {
+	if v, ok := lbv1.HttpMethod_value["HTTP_METHOD_"+strings.ToUpper(strings.TrimSpace(method))]; ok && v != 0 {
+		return lbv1.HttpMethod(v), nil
+	}
+	return lbv1.HttpMethod_HTTP_METHOD_UNSPECIFIED, fmt.Errorf("unknown HTTP method %q", method)
+}
+
+// getHTTPConfig reads the HTTP annotations of the Service; nil means none were set.
+func getHTTPConfig(service *corev1.Service) (*httpConfig, error) {
+	path, ok := service.Annotations[ServiceAnnotationLoadBalancerHTTPPath]
+	if !ok {
+		for _, annotation := range []string{ServiceAnnotationLoadBalancerHTTPMethod, ServiceAnnotationLoadBalancerHTTPHostnames} {
+			if _, set := service.Annotations[annotation]; set {
+				return nil, fmt.Errorf("annotation %s needs %s, which turns the TCP ports into HTTP listeners", annotation, ServiceAnnotationLoadBalancerHTTPPath)
+			}
+		}
+		return nil, nil
+	}
+
+	path = strings.TrimSpace(path)
+	if path == "" {
+		path = "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		return nil, fmt.Errorf("annotation %s must start with /, got %q", ServiceAnnotationLoadBalancerHTTPPath, path)
+	}
+	conf := &httpConfig{
+		pathPrefix:      path,
+		monitorPath:     getStringFromServiceAnnotation(service, ServiceAnnotationLoadBalancerHealthMonitorHTTPPath, path),
+		monitorMethod:   lbv1.HttpMethod_HTTP_METHOD_GET,
+		monitorExpected: []int32{200},
+	}
+	if !strings.HasPrefix(conf.monitorPath, "/") {
+		return nil, fmt.Errorf("annotation %s must start with /, got %q", ServiceAnnotationLoadBalancerHealthMonitorHTTPPath, conf.monitorPath)
+	}
+
+	if method := getStringFromServiceAnnotation(service, ServiceAnnotationLoadBalancerHTTPMethod, ""); method != "" {
+		m, err := parseHTTPMethod(method)
+		if err != nil {
+			return nil, fmt.Errorf("annotation %s: %v", ServiceAnnotationLoadBalancerHTTPMethod, err)
+		}
+		conf.method = m
+	}
+	if method := getStringFromServiceAnnotation(service, ServiceAnnotationLoadBalancerHealthMonitorHTTPMethod, ""); method != "" {
+		m, err := parseHTTPMethod(method)
+		if err != nil {
+			return nil, fmt.Errorf("annotation %s: %v", ServiceAnnotationLoadBalancerHealthMonitorHTTPMethod, err)
+		}
+		conf.monitorMethod = m
+	}
+
+	for _, hostname := range cpoutil.SplitTrim(getStringFromServiceAnnotation(service, ServiceAnnotationLoadBalancerHTTPHostnames, ""), ',') {
+		if !hostnamePattern.MatchString(hostname) {
+			return nil, fmt.Errorf("annotation %s: %q is not a valid hostname", ServiceAnnotationLoadBalancerHTTPHostnames, hostname)
+		}
+		if !slices.Contains(conf.hostnames, hostname) {
+			conf.hostnames = append(conf.hostnames, hostname)
+		}
+	}
+	if len(conf.hostnames) > 16 {
+		return nil, fmt.Errorf("annotation %s lists %d hostnames, at most 16 are allowed", ServiceAnnotationLoadBalancerHTTPHostnames, len(conf.hostnames))
+	}
+
+	if codes := getStringFromServiceAnnotation(service, ServiceAnnotationLoadBalancerHealthMonitorExpectedCodes, ""); codes != "" {
+		conf.monitorExpected = nil
+		for _, code := range cpoutil.SplitTrim(codes, ',') {
+			c, err := strconv.Atoi(code)
+			if err != nil || c < 100 || c > 599 {
+				return nil, fmt.Errorf("annotation %s: %q is not an HTTP status code", ServiceAnnotationLoadBalancerHealthMonitorExpectedCodes, code)
+			}
+			conf.monitorExpected = append(conf.monitorExpected, int32(c))
+		}
+	}
+
+	return conf, nil
 }
 
 // isLoadBalancerGone tells whether the load balancer is absent or on its way out.
@@ -449,15 +557,35 @@ func buildEndpoints(port corev1.ServicePort, nodes []*corev1.Node, svcConf *serv
 // when the rule gets none. UDP listeners never get one: the load balancer
 // probes with a TCP connect, which a UDP node port does not answer.
 func buildHealthMonitor(protocol lbv1.Protocol, svcConf *serviceConfig) *lbv1.HealthMonitor {
-	if !svcConf.enableMonitor || protocol != lbv1.Protocol_PROTOCOL_TCP {
+	if !svcConf.enableMonitor || protocol == lbv1.Protocol_PROTOCOL_UDP {
 		return nil
 	}
-	return &lbv1.HealthMonitor{
+	monitor := &lbv1.HealthMonitor{
 		Interval:           int32(svcConf.healthMonitorDelay),
 		Timeout:            int32(svcConf.healthMonitorTimeout),
 		HealthyThreshold:   int32(svcConf.healthMonitorMaxRetries),
 		UnhealthyThreshold: int32(svcConf.healthMonitorMaxRetriesDown),
 	}
+	// The service requires path, method and expected codes on the monitor of an HTTP listener.
+	if protocol == lbv1.Protocol_PROTOCOL_HTTP {
+		monitor.HttpHealthCheckPath = svcConf.http.monitorPath
+		monitor.HttpHealthCheckMethod = svcConf.http.monitorMethod
+		monitor.ExpectedStatusCodes = svcConf.http.monitorExpected
+	}
+	return monitor
+}
+
+// buildHTTPMatches returns the match of the rule of an HTTP listener. No match
+// at all is how the service spells "every request".
+func buildHTTPMatches(conf *httpConfig) []*lbv1.HttpRouteMatch {
+	match := &lbv1.HttpRouteMatch{Method: conf.method}
+	if conf.pathPrefix != "/" {
+		match.Path = &lbv1.HttpPathMatch{Type: lbv1.HttpPathType_HTTP_PATH_TYPE_PREFIX, Value: conf.pathPrefix}
+	}
+	if match.Path == nil && match.Method == lbv1.HttpMethod_HTTP_METHOD_UNSPECIFIED {
+		return nil
+	}
+	return []*lbv1.HttpRouteMatch{match}
 }
 
 // buildListeners renders the Service as one listener per port. Each listener
@@ -471,6 +599,9 @@ func buildListeners(service *corev1.Service, nodes []*corev1.Node, svcConf *serv
 		if err != nil {
 			return nil, err
 		}
+		if protocol == lbv1.Protocol_PROTOCOL_TCP && svcConf.http != nil {
+			protocol = lbv1.Protocol_PROTOCOL_HTTP
+		}
 		if port.NodePort == 0 {
 			return nil, fmt.Errorf("port %d has no node port; Services without node ports are not supported", port.Port)
 		}
@@ -480,7 +611,7 @@ func buildListeners(service *corev1.Service, nodes []*corev1.Node, svcConf *serv
 			return nil, fmt.Errorf("no usable node address found for port %d", port.Port)
 		}
 
-		listeners = append(listeners, &lbv1.Listener{
+		listener := &lbv1.Listener{
 			Port:     port.Port,
 			Protocol: protocol,
 			Rules: []*lbv1.ListenerRule{{
@@ -492,7 +623,12 @@ func buildListeners(service *corev1.Service, nodes []*corev1.Node, svcConf *serv
 				}},
 				HealthMonitor: buildHealthMonitor(protocol, svcConf),
 			}},
-		})
+		}
+		if protocol == lbv1.Protocol_PROTOCOL_HTTP {
+			listener.Hostnames = svcConf.http.hostnames
+			listener.Rules[0].Matches = buildHTTPMatches(svcConf.http)
+		}
+		listeners = append(listeners, listener)
 	}
 
 	return listeners, nil
@@ -1023,6 +1159,12 @@ func (lbaas *LbaasV2) makeSvcConf(serviceName string, service *corev1.Service, s
 		lbaas.eventRecorder.Eventf(service, corev1.EventTypeWarning, eventLBSourceRangesIgnored, msg, serviceName)
 		klog.Warningf(msg, serviceName)
 	}
+
+	http, err := getHTTPConfig(service)
+	if err != nil {
+		return fmt.Errorf("invalid HTTP configuration for service %s: %v", serviceName, err)
+	}
+	svcConf.http = http
 
 	svcConf.enableMonitor = getBoolFromServiceAnnotation(service, ServiceAnnotationLoadBalancerEnableHealthMonitor, lbaas.opts.CreateMonitor)
 	svcConf.healthMonitorDelay = getIntFromServiceAnnotation(service, ServiceAnnotationLoadBalancerHealthMonitorDelay, int(lbaas.opts.MonitorDelay.Seconds()))

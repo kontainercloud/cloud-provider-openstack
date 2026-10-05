@@ -22,7 +22,7 @@ You need to configure an `openstack-ccm.yaml` values file with at least:
   - `cloudConfig.loadBalancer.rpc-server-addr` with the address of the load balancer service, for example `loadbalancer-api.lb-system.svc:8080`
   - `cloudConfig.loadBalancer.api-key` if the load balancer service requires one
 
-Health checks are attached to TCP listeners by default. Set `cloudConfig.loadBalancer.create-monitor: false` to turn them off.
+Health checks are attached to TCP and HTTP listeners by default. Set `cloudConfig.loadBalancer.create-monitor: false` to turn them off. Service annotations, including the HTTP listener annotations, are described in [Exposing applications using services of LoadBalancer type](../../docs/openstack-cloud-controller-manager/expose-applications-using-loadbalancer-type-service.md).
 
 Then install a release named after the workload cluster, in the namespace of its `Cluster` object:
 
