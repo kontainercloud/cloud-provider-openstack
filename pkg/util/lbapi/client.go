@@ -69,7 +69,8 @@ type Config struct {
 	APIKey string
 	// Timeout bounds a single RPC attempt. Each retry gets a fresh Timeout.
 	Timeout time.Duration
-	// RetryMax is the number of retries after the first attempt.
+	// RetryMax is the number of retries after the first attempt. 0 means no
+	// retry, a negative value the default.
 	RetryMax int
 	// RetryDelay is the base of the exponential backoff between attempts.
 	RetryDelay time.Duration
@@ -108,7 +109,7 @@ func NewClient(config Config) (*Client, error) {
 	if config.Timeout <= 0 {
 		config.Timeout = DefaultTimeout
 	}
-	if config.RetryMax <= 0 {
+	if config.RetryMax < 0 {
 		config.RetryMax = DefaultRetryMax
 	}
 	if config.RetryDelay <= 0 {
@@ -153,13 +154,21 @@ func normalizeServerAddr(addr string) (string, error) {
 	if addr == "" {
 		return "", fmt.Errorf("load balancer service address is empty")
 	}
+	// Targets naming a gRPC resolver are handed through untouched, also in
+	// their forms without "//" such as unix:/run/lb.sock or dns:lb-api:8080.
+	for _, scheme := range []string{"dns:", "unix:", "unix-abstract:", "passthrough:"} {
+		if strings.HasPrefix(addr, scheme) {
+			return addr, nil
+		}
+	}
 	if !strings.Contains(addr, "://") {
 		// "host:port/" or "host:port/path": only host:port can be dialed.
-		host, _, _ := strings.Cut(addr, "/")
-		if host == "" {
-			return "", fmt.Errorf("invalid load balancer service address %q: no host", addr)
+		hostPort, _, _ := strings.Cut(addr, "/")
+		// Without a port gRPC would dial 443, where nothing answers in plaintext.
+		if host, port, err := net.SplitHostPort(hostPort); err != nil || host == "" || port == "" {
+			return "", fmt.Errorf("invalid load balancer service address %q: use host:port or http://host:port", addr)
 		}
-		return host, nil
+		return hostPort, nil
 	}
 
 	u, err := url.Parse(addr)

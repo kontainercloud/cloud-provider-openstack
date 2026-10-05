@@ -118,7 +118,9 @@ Create cloud-config makro.
 internal-lb = "true"
 {{- else }}
 internal-lb = "false"
-floating-network-id = {{ .Values.loadBalancer.floatingNetworkID | quote }}
+{{- with .Values.loadBalancer.floatingNetworkID }}
+floating-network-id = {{ . | quote }}
+{{- end }}
 {{- end }}
 {{- range $key, $value := .Values.cloudConfig.loadBalancer }}
 {{- if not (has $key (list "internal-lb" "floating-network-id")) }}
@@ -165,7 +167,8 @@ Secret brought along with secret.create=false carries its own settings.
 {{- if not (has .Values.loadBalancer.mode (list "external" "internal")) -}}
 {{- fail (printf "loadBalancer.mode must be external or internal, got %q" .Values.loadBalancer.mode) -}}
 {{- end -}}
-{{- if and (eq .Values.loadBalancer.mode "external") (not .Values.loadBalancer.floatingNetworkID) -}}
+{{- $lbDisabled := eq (lower (toString (get (.Values.cloudConfig.loadBalancer | default dict) "enabled"))) "false" -}}
+{{- if and (eq .Values.loadBalancer.mode "external") (not .Values.loadBalancer.floatingNetworkID) (not $lbDisabled) -}}
 {{- fail "loadBalancer.floatingNetworkID is required when loadBalancer.mode is external: floating IPs are allocated from that network" -}}
 {{- end -}}
 {{- range $key := list "internal-lb" "floating-network-id" -}}

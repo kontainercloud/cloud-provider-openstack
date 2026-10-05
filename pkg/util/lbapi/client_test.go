@@ -247,6 +247,9 @@ func TestNormalizeServerAddr(t *testing.T) {
 		{"http://[fd00::1]:8080", "[fd00::1]:8080"},
 		{"dns:///lb-api:8080", "dns:///lb-api:8080"},
 		{"passthrough:///bufnet", "passthrough:///bufnet"},
+		{"unix:/var/run/lb-api.sock", "unix:/var/run/lb-api.sock"},
+		{"unix:///var/run/lb-api.sock", "unix:///var/run/lb-api.sock"},
+		{"dns:lb-api:8080", "dns:lb-api:8080"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.in, func(t *testing.T) {
@@ -258,7 +261,7 @@ func TestNormalizeServerAddr(t *testing.T) {
 }
 
 func TestNormalizeServerAddrRejects(t *testing.T) {
-	for _, in := range []string{"", "   ", "https://lb-api:8443", "http://:8080"} {
+	for _, in := range []string{"", "   ", "https://lb-api:8443", "http://:8080", "lb-api", "lb-api/", ":8080"} {
 		t.Run(in, func(t *testing.T) {
 			_, err := normalizeServerAddr(in)
 			assert.Error(t, err)

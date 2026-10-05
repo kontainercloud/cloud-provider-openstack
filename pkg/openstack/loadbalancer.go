@@ -189,7 +189,6 @@ type serviceConfig struct {
 	algorithm                   lbv1.Algorithm
 	enableMonitor               bool
 	lbID                        string
-	lbName                      string
 	healthMonitorDelay          int
 	healthMonitorTimeout        int
 	healthMonitorMaxRetries     int
@@ -724,13 +723,6 @@ func (lbaas *LbaasV2) updateLoadBalancerConfig(ctx context.Context, service *cor
 	}
 
 	current := loadbalancer.GetSpec()
-	if spec.GetSubnetId() != "" && current.GetSubnetId() != "" && !sameID(spec.GetSubnetId(), current.GetSubnetId()) ||
-		spec.GetNetworkId() != "" && current.GetNetworkId() != "" && !sameID(spec.GetNetworkId(), current.GetNetworkId()) {
-		msg := "Load balancer %s of Service %s/%s stays on network %s subnet %s, the network and subnet of a load balancer cannot be changed; delete and recreate the Service to move it"
-		lbaas.eventRecorder.Eventf(service, corev1.EventTypeWarning, eventLBNetworkChangeIgnored, msg, loadbalancer.GetId(), service.Namespace, service.Name, current.GetNetworkId(), current.GetSubnetId())
-		klog.Warningf(msg, loadbalancer.GetId(), service.Namespace, service.Name, current.GetNetworkId(), current.GetSubnetId())
-	}
-
 	klog.InfoS("Updating load balancer", "lbID", loadbalancer.GetId(), "service", klog.KObj(service))
 	mc := metrics.NewMetricContext("loadbalancer", "update")
 	_, err := lbaas.lb.UpdateLoadBalancer(ctx, &lbv1.UpdateLoadBalancerRequest{
@@ -755,6 +747,18 @@ func (lbaas *LbaasV2) updateLoadBalancerConfig(ctx context.Context, service *cor
 		return loadbalancer, nil
 	}
 	return lbaas.waitLoadBalancerReady(ctx, loadbalancer.GetId())
+}
+
+// checkNetworkUnchanged reports a Service whose subnet or network no longer
+// matches its load balancer's: neither can be changed after creation.
+func (lbaas *LbaasV2) checkNetworkUnchanged(service *corev1.Service, loadbalancer *lbv1.LoadBalancer, spec *lbv1.LoadBalancerSpec) {
+	current := loadbalancer.GetSpec()
+	if spec.GetSubnetId() != "" && current.GetSubnetId() != "" && !sameID(spec.GetSubnetId(), current.GetSubnetId()) ||
+		spec.GetNetworkId() != "" && current.GetNetworkId() != "" && !sameID(spec.GetNetworkId(), current.GetNetworkId()) {
+		msg := "Load balancer %s of Service %s/%s stays on network %s subnet %s, the network and subnet of a load balancer cannot be changed; delete and recreate the Service to move it"
+		lbaas.eventRecorder.Eventf(service, corev1.EventTypeWarning, eventLBNetworkChangeIgnored, msg, loadbalancer.GetId(), service.Namespace, service.Name, current.GetNetworkId(), current.GetSubnetId())
+		klog.Warningf(msg, loadbalancer.GetId(), service.Namespace, service.Name, current.GetNetworkId(), current.GetSubnetId())
+	}
 }
 
 // sameID compares two OpenStack UUIDs, which the service accepts with or without dashes.
@@ -785,12 +789,11 @@ func (lbaas *LbaasV2) GetLoadBalancer(ctx context.Context, clusterName string, s
 		return nil, false, nil
 	}
 
-	status := &corev1.LoadBalancerStatus{}
-	if addr := loadBalancerAddress(loadbalancer); addr != "" {
-		status.Ingress = []corev1.LoadBalancerIngress{{IP: addr}}
+	addr := loadBalancerAddress(loadbalancer)
+	if addr == "" {
+		return &corev1.LoadBalancerStatus{}, true, nil
 	}
-
-	return status, true, nil
+	return lbaas.createLoadBalancerStatus(service, addr), true, nil
 }
 
 // loadBalancerAddress returns the address clients reach the load balancer at:
@@ -1031,16 +1034,6 @@ func (lbaas *LbaasV2) checkServiceUpdate(service *corev1.Service, svcConf *servi
 	return lbaas.makeSvcConf(serviceName, service, svcConf)
 }
 
-func (lbaas *LbaasV2) checkServiceDelete(service *corev1.Service, svcConf *serviceConfig) error {
-	svcConf.lbID = getStringFromServiceAnnotation(service, ServiceAnnotationLoadBalancerID, "")
-	svcConf.tenantID = lbaas.tenantID
-	if svcConf.tenantID == "" {
-		return fmt.Errorf("the project ID of the load balancer is unknown, set tenant-id in the [LoadBalancer] section of the cloud config")
-	}
-
-	return nil
-}
-
 func (lbaas *LbaasV2) checkService(ctx context.Context, service *corev1.Service, nodes []*corev1.Node, svcConf *serviceConfig) error {
 	serviceName := fmt.Sprintf("%s/%s", service.Namespace, service.Name)
 
@@ -1074,6 +1067,25 @@ func (lbaas *LbaasV2) checkService(ctx context.Context, service *corev1.Service,
 			lbaas.eventRecorder.Eventf(service, corev1.EventTypeWarning, eventLBInternalAnnotationIgnored, msg, ServiceAnnotationLoadBalancerInternal, serviceName, mode)
 			klog.Warningf(msg, ServiceAnnotationLoadBalancerInternal, serviceName, mode)
 		}
+	}
+
+	// Reported here only: UpdateLoadBalancer runs for every Service on every
+	// node change and would repeat these events each time.
+	var ignored []string
+	for _, annotation := range unsupportedServiceAnnotations {
+		if _, ok := service.Annotations[annotation]; ok {
+			ignored = append(ignored, annotation)
+		}
+	}
+	if len(ignored) > 0 {
+		msg := "Annotations %s of Service %s are ignored because the load balancer service does not support them"
+		lbaas.eventRecorder.Eventf(service, corev1.EventTypeWarning, eventLBAnnotationIgnored, msg, strings.Join(ignored, ", "), serviceName)
+		klog.Warningf(msg, strings.Join(ignored, ", "), serviceName)
+	}
+	if len(service.Spec.LoadBalancerSourceRanges) > 0 {
+		msg := "LoadBalancerSourceRanges are ignored for Service %s because the load balancer service does not support it"
+		lbaas.eventRecorder.Eventf(service, corev1.EventTypeWarning, eventLBSourceRangesIgnored, msg, serviceName)
+		klog.Warningf(msg, serviceName)
 	}
 
 	svcConf.lbNetworkID = getStringFromServiceAnnotation(service, ServiceAnnotationLoadBalancerNetworkID, lbaas.opts.NetworkID)
@@ -1118,10 +1130,6 @@ func (lbaas *LbaasV2) checkService(ctx context.Context, service *corev1.Service,
 
 func (lbaas *LbaasV2) makeSvcConf(serviceName string, service *corev1.Service, svcConf *serviceConfig) error {
 	svcConf.tenantID = lbaas.tenantID
-	if svcConf.tenantID == "" {
-		return fmt.Errorf("the project ID of the load balancer is unknown, set tenant-id in the [LoadBalancer] section of the cloud config")
-	}
-
 	svcConf.lbID = getStringFromServiceAnnotation(service, ServiceAnnotationLoadBalancerID, "")
 
 	// The load balancer service uses 0 for "no limit", Octavia used -1.
@@ -1141,23 +1149,6 @@ func (lbaas *LbaasV2) makeSvcConf(serviceName string, service *corev1.Service, s
 		} else {
 			klog.V(3).Infof("Target node label %s=%s is set to LoadBalancer service %s", key, value, serviceName)
 		}
-	}
-
-	var ignored []string
-	for _, annotation := range unsupportedServiceAnnotations {
-		if _, ok := service.Annotations[annotation]; ok {
-			ignored = append(ignored, annotation)
-		}
-	}
-	if len(ignored) > 0 {
-		msg := "Annotations %s of Service %s are ignored because the load balancer service does not support them"
-		lbaas.eventRecorder.Eventf(service, corev1.EventTypeWarning, eventLBAnnotationIgnored, msg, strings.Join(ignored, ", "), serviceName)
-		klog.Warningf(msg, strings.Join(ignored, ", "), serviceName)
-	}
-	if len(service.Spec.LoadBalancerSourceRanges) > 0 {
-		msg := "LoadBalancerSourceRanges are ignored for Service %s because the load balancer service does not support it"
-		lbaas.eventRecorder.Eventf(service, corev1.EventTypeWarning, eventLBSourceRangesIgnored, msg, serviceName)
-		klog.Warningf(msg, serviceName)
 	}
 
 	http, err := getHTTPConfig(service)
@@ -1238,7 +1229,6 @@ func (lbaas *LbaasV2) ensureLoadBalancer(ctx context.Context, clusterName string
 	}
 
 	lbName := lbaas.GetLoadBalancerName(ctx, clusterName, service)
-	svcConf.lbName = lbName
 	serviceName := fmt.Sprintf("%s/%s", service.Namespace, service.Name)
 	var loadbalancer *lbv1.LoadBalancer
 	createNewLB := false
@@ -1253,8 +1243,12 @@ func (lbaas *LbaasV2) ensureLoadBalancer(ctx context.Context, clusterName string
 			// The load balancer was deleted behind our back. Its idempotency
 			// key must not be used again, the service would answer with the
 			// deleted load balancer.
+			// The ID is dropped so that this happens once, not on every
+			// reconcile until a new load balancer exists.
 			klog.InfoS("Load balancer in the Service annotation does not exist anymore", "lbID", svcConf.lbID, "service", klog.KObj(service))
 			lbaas.updateServiceAnnotation(service, ServiceAnnotationLoadBalancerCreateAttempt, strconv.Itoa(getCreateAttempt(service)+1))
+			delete(service.Annotations, ServiceAnnotationLoadBalancerID)
+			delete(service.Annotations, ServiceAnnotationLoadBalancerConfigHash)
 			loadbalancer = nil
 		} else if loadbalancer.GetName() != lbName {
 			// The annotation can be set by anyone who can edit the Service.
@@ -1285,6 +1279,7 @@ func (lbaas *LbaasV2) ensureLoadBalancer(ctx context.Context, clusterName string
 
 	// This is an existing load balancer, bring its configuration in line with the Service and the nodes.
 	if !createNewLB {
+		lbaas.checkNetworkUnchanged(service, loadbalancer, spec)
 		loadbalancer, err = lbaas.updateLoadBalancerConfig(ctx, service, loadbalancer, spec, true)
 		if err != nil {
 			return nil, err
@@ -1443,34 +1438,33 @@ func (lbaas *LbaasV2) deleteLoadBalancer(ctx context.Context, loadbalancer *lbv1
 
 func (lbaas *LbaasV2) ensureLoadBalancerDeleted(ctx context.Context, clusterName string, service *corev1.Service) error {
 	lbName := lbaas.GetLoadBalancerName(ctx, clusterName, service)
-	var err error
 	var loadbalancer *lbv1.LoadBalancer
+	var err error
 
-	svcConf := new(serviceConfig)
-	if err := lbaas.checkServiceDelete(service, svcConf); err != nil {
-		return err
+	if lbID := getStringFromServiceAnnotation(service, ServiceAnnotationLoadBalancerID, ""); lbID != "" {
+		loadbalancer, err = getLoadbalancerByID(ctx, lbaas.lb, lbID)
+		if err != nil && !cpoerrors.IsNotFound(err) {
+			return err
+		}
+		// Only delete what was created for this Service: the ID in the
+		// annotation can be changed by anyone who can edit the Service.
+		if loadbalancer != nil && loadbalancer.GetName() != lbName {
+			klog.Warningf("Not deleting load balancer %s (%s) referenced by Service %s/%s: it was not created for this Service", loadbalancer.GetId(), loadbalancer.GetName(), service.Namespace, service.Name)
+			loadbalancer = nil
+		}
 	}
-	svcConf.lbName = lbName
-
-	if svcConf.lbID != "" {
-		loadbalancer, err = getLoadbalancerByID(ctx, lbaas.lb, svcConf.lbID)
-	} else {
-		// This may happen when this Service creation was failed previously.
-		loadbalancer, err = getLoadbalancerByName(ctx, lbaas.lb, svcConf.tenantID, lbName)
-	}
-	if err != nil && !cpoerrors.IsNotFound(err) {
-		return err
+	// Without a usable ID the Service's load balancer can still exist, for
+	// instance when the creation response was lost or the annotation was edited.
+	if loadbalancer == nil {
+		loadbalancer, err = getLoadbalancerByName(ctx, lbaas.lb, lbaas.tenantID, lbName)
+		if err != nil && !cpoerrors.IsNotFound(err) {
+			return err
+		}
 	}
 
 	if loadbalancer != nil {
-		// Only delete what was created for this Service. The ID in the
-		// annotation can be changed by anyone who can edit the Service.
-		if loadbalancer.GetName() == lbName {
-			if err := lbaas.deleteLoadBalancer(ctx, loadbalancer, service); err != nil {
-				return err
-			}
-		} else {
-			klog.Warningf("Not deleting load balancer %s (%s) referenced by Service %s/%s: it was not created for this Service", loadbalancer.GetId(), loadbalancer.GetName(), service.Namespace, service.Name)
+		if err := lbaas.deleteLoadBalancer(ctx, loadbalancer, service); err != nil {
+			return err
 		}
 	}
 

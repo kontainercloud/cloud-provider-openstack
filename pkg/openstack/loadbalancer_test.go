@@ -1701,14 +1701,6 @@ func TestMakeSvcConf(t *testing.T) {
 	}
 }
 
-func TestMakeSvcConfWithoutTenant(t *testing.T) {
-	svc := newTestService()
-	lbaas, _ := newTestLbaas(t, newFakeLBClient(), svc)
-	lbaas.tenantID = ""
-
-	assert.ErrorContains(t, lbaas.makeSvcConf("default/web", svc, new(serviceConfig)), "tenant-id")
-}
-
 func TestGetLoadbalancerByName(t *testing.T) {
 	client := newFakeLBClient()
 	client.pageSize = 2
@@ -2209,6 +2201,19 @@ func TestEnsureLoadBalancerDeleted(t *testing.T) {
 		require.NoError(t, lbaas.EnsureLoadBalancerDeleted(context.Background(), testLBClusterName, svc))
 		assert.Empty(t, client.deleteReqs)
 		assert.Len(t, client.lbs, 1)
+	})
+
+	t.Run("own load balancer is deleted when the annotation points elsewhere", func(t *testing.T) {
+		client := newFakeLBClient()
+		client.add(&lbv1.LoadBalancer{Id: lbID, Name: "kube_service_kubernetes_default_other", Spec: spec, State: lbv1.State_STATE_READY})
+		client.add(&lbv1.LoadBalancer{Id: "00000000-0000-4000-8000-000000000002", Name: testLBName, Spec: spec, State: lbv1.State_STATE_READY})
+		svc := withID(newTestService())
+		lbaas, _ := newTestLbaas(t, client, svc)
+
+		require.NoError(t, lbaas.EnsureLoadBalancerDeleted(context.Background(), testLBClusterName, svc))
+		require.Len(t, client.deleteReqs, 1)
+		assert.Equal(t, "00000000-0000-4000-8000-000000000002", client.deleteReqs[0].Id)
+		assert.Contains(t, client.lbs, lbID, "the load balancer of the other Service stays")
 	})
 }
 

@@ -105,33 +105,32 @@ type LoadBalancerOpts struct {
 	// The options below this line are the ones of the former Octavia
 	// implementation. Some keep their meaning, see ignoredLoadBalancerOpts for
 	// those that do not.
-	LBVersion                      string              `gcfg:"lb-version"`           // overrides autodetection. Only support v2.
-	SubnetID                       string              `gcfg:"subnet-id"`            // overrides autodetection.
-	MemberSubnetID                 string              `gcfg:"member-subnet-id"`     // overrides autodetection.
-	NetworkID                      string              `gcfg:"network-id"`           // If specified, will create virtual ip from a subnet in network which has available IP addresses
-	FloatingNetworkID              string              `gcfg:"floating-network-id"`  // If specified, will create floating ip for loadbalancer, or do not create floating ip.
-	FloatingSubnetID               string              `gcfg:"floating-subnet-id"`   // If specified, will create floating ip for loadbalancer in this particular floating pool subnetwork.
-	FloatingSubnet                 string              `gcfg:"floating-subnet"`      // If specified, will create floating ip for loadbalancer in one of the matching floating pool subnetworks.
-	FloatingSubnetTags             string              `gcfg:"floating-subnet-tags"` // If specified, will create floating ip for loadbalancer in one of the matching floating pool subnetworks.
-	LBClasses                      map[string]*LBClass // Predefined named Floating networks and subnets
-	LBMethod                       string              `gcfg:"lb-method"` // default to ROUND_ROBIN.
-	LBProvider                     string              `gcfg:"lb-provider"`
-	CreateMonitor                  bool                `gcfg:"create-monitor"`
-	MonitorDelay                   util.MyDuration     `gcfg:"monitor-delay"`
-	MonitorTimeout                 util.MyDuration     `gcfg:"monitor-timeout"`
-	MonitorMaxRetries              uint                `gcfg:"monitor-max-retries"`
-	MonitorMaxRetriesDown          uint                `gcfg:"monitor-max-retries-down"`
-	ManageSecurityGroups           bool                `gcfg:"manage-security-groups"`
-	InternalLB                     bool                `gcfg:"internal-lb"`   // default false
-	NodeSelector                   string              `gcfg:"node-selector"` // If specified, the loadbalancer members will be assined only from nodes list filtered by node-selector labels
-	CascadeDelete                  bool                `gcfg:"cascade-delete"`
-	FlavorID                       string              `gcfg:"flavor-id"`
-	AvailabilityZone               string              `gcfg:"availability-zone"`
-	EnableIngressHostname          bool                `gcfg:"enable-ingress-hostname"`            // Used with proxy protocol by adding a dns suffix to the load balancer IP address. Default false.
-	IngressHostnameSuffix          string              `gcfg:"ingress-hostname-suffix"`            // Used with proxy protocol by adding a dns suffix to the load balancer IP address. Default nip.io.
-	MaxSharedLB                    int                 `gcfg:"max-shared-lb"`                      //  Number of Services in maximum can share a single load balancer. Default 2
-	ContainerStore                 string              `gcfg:"container-store"`                    // Used to specify the store of the tls-container-ref
-	ProviderRequiresSerialAPICalls bool                `gcfg:"provider-requires-serial-api-calls"` // default false, the provider supports the "bulk update" API call
+	LBVersion                      string          `gcfg:"lb-version"`           // overrides autodetection. Only support v2.
+	SubnetID                       string          `gcfg:"subnet-id"`            // overrides autodetection.
+	MemberSubnetID                 string          `gcfg:"member-subnet-id"`     // overrides autodetection.
+	NetworkID                      string          `gcfg:"network-id"`           // If specified, will create virtual ip from a subnet in network which has available IP addresses
+	FloatingNetworkID              string          `gcfg:"floating-network-id"`  // If specified, will create floating ip for loadbalancer, or do not create floating ip.
+	FloatingSubnetID               string          `gcfg:"floating-subnet-id"`   // If specified, will create floating ip for loadbalancer in this particular floating pool subnetwork.
+	FloatingSubnet                 string          `gcfg:"floating-subnet"`      // If specified, will create floating ip for loadbalancer in one of the matching floating pool subnetworks.
+	FloatingSubnetTags             string          `gcfg:"floating-subnet-tags"` // If specified, will create floating ip for loadbalancer in one of the matching floating pool subnetworks.
+	LBMethod                       string          `gcfg:"lb-method"`            // default to ROUND_ROBIN.
+	LBProvider                     string          `gcfg:"lb-provider"`
+	CreateMonitor                  bool            `gcfg:"create-monitor"`
+	MonitorDelay                   util.MyDuration `gcfg:"monitor-delay"`
+	MonitorTimeout                 util.MyDuration `gcfg:"monitor-timeout"`
+	MonitorMaxRetries              uint            `gcfg:"monitor-max-retries"`
+	MonitorMaxRetriesDown          uint            `gcfg:"monitor-max-retries-down"`
+	ManageSecurityGroups           bool            `gcfg:"manage-security-groups"`
+	InternalLB                     bool            `gcfg:"internal-lb"`   // default false
+	NodeSelector                   string          `gcfg:"node-selector"` // If specified, the loadbalancer members will be assined only from nodes list filtered by node-selector labels
+	CascadeDelete                  bool            `gcfg:"cascade-delete"`
+	FlavorID                       string          `gcfg:"flavor-id"`
+	AvailabilityZone               string          `gcfg:"availability-zone"`
+	EnableIngressHostname          bool            `gcfg:"enable-ingress-hostname"`            // Used with proxy protocol by adding a dns suffix to the load balancer IP address. Default false.
+	IngressHostnameSuffix          string          `gcfg:"ingress-hostname-suffix"`            // Used with proxy protocol by adding a dns suffix to the load balancer IP address. Default nip.io.
+	MaxSharedLB                    int             `gcfg:"max-shared-lb"`                      //  Number of Services in maximum can share a single load balancer. Default 2
+	ContainerStore                 string          `gcfg:"container-store"`                    // Used to specify the store of the tls-container-ref
+	ProviderRequiresSerialAPICalls bool            `gcfg:"provider-requires-serial-api-calls"` // default false, the provider supports the "bulk update" API call
 	// revive:disable:var-naming
 	TlsContainerRef string `gcfg:"default-tls-container-ref"` //  reference to a tls container
 	// revive:enable:var-naming
@@ -348,10 +347,6 @@ func NewOpenStack(cfg Config) (*OpenStack, error) {
 		networkingOpts: cfg.Networking,
 	}
 
-	// ini file doesn't support maps so we are reusing top level sub sections
-	// and copy the resulting map to corresponding loadbalancer section
-	os.lbOpts.LBClasses = cfg.LoadBalancerClass
-
 	err = checkOpenStackOpts(&os)
 	if err != nil {
 		return nil, err
@@ -364,15 +359,25 @@ func NewOpenStack(cfg Config) (*OpenStack, error) {
 // scoped to. The configured tenant ID is the fallback: it is empty when the
 // project is given by name or comes with an application credential.
 func projectIDFromProvider(provider *gophercloud.ProviderClient, configured string) string {
-	if provider != nil {
-		if result, ok := provider.GetAuthResult().(tokens.CreateResult); ok {
-			project, err := result.ExtractProject()
-			if err == nil && project != nil && project.ID != "" {
-				return project.ID
-			}
-			klog.V(2).Infof("Could not read the project from the Keystone token: %v", err)
-		}
+	if provider == nil {
+		return configured
 	}
+	// Password and application credential logins create a token, token
+	// logins look the given token up.
+	var project *tokens.Project
+	var err error
+	switch result := provider.GetAuthResult().(type) {
+	case tokens.CreateResult:
+		project, err = result.ExtractProject()
+	case tokens.GetResult:
+		project, err = result.ExtractProject()
+	default:
+		return configured
+	}
+	if err == nil && project != nil && project.ID != "" {
+		return project.ID
+	}
+	klog.V(2).Infof("Could not read the project from the Keystone token: %v", err)
 	return configured
 }
 
