@@ -17,6 +17,19 @@
 # inside the managed cluster" in the README.
 #
 
+# Load balancers of the workload cluster, one mode for all its Services:
+#   external: every load balancer gets a floating IP from floatingNetworkID,
+#             which is required. Services are reached at the floating IP.
+#   internal: no load balancer gets a floating IP. Services are reached at the
+#             load balancer's address on the cluster subnet.
+# The Service annotation service.beta.kubernetes.io/openstack-internal-load-balancer
+# cannot change the mode; a Service carrying a different value gets a warning event.
+loadBalancer:
+  mode: external
+  # ID of the external network floating IPs are allocated from. Required when
+  # mode is external, ignored when it is internal.
+  floatingNetworkID: ""
+
 # Kind of the controller workload: Deployment (default) or DaemonSet. Leader
 # election makes sure only one pod is active either way.
 kind: Deployment
@@ -187,7 +200,8 @@ cloudConfig:
   #   tenant-id: ""          # defaults to the project of the [Global] credentials
   #   subnet-id: ""          # defaults to the subnet of the first node
   #   network-id: ""         # defaults to the network of subnet-id
-  #   floating-network-id: "" # defaults to the only external network
+  # internal-lb and floating-network-id are set from loadBalancer.mode and
+  # loadBalancer.floatingNetworkID above, do not set them here.
   #   vpc-cidr: ""
   #   security-group-ids: ""
   #   qos-policy-id: ""

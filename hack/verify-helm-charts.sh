@@ -27,7 +27,12 @@ if ! command -v helm &>/dev/null; then
 fi
 
 echo "=== Linting charts ==="
-helm lint charts/*
+# The OCCM chart needs a floating network in its default (external) mode;
+# lint it in both load balancer modes.
+helm lint $(ls -d charts/* | grep -v '^charts/openstack-cloud-controller-manager$')
+helm lint charts/openstack-cloud-controller-manager \
+  --set loadBalancer.floatingNetworkID=00000000-0000-4000-8000-000000000000
+helm lint charts/openstack-cloud-controller-manager --set loadBalancer.mode=internal
 for values_file in charts/*/ci/*.yaml; do
   chart_dir="$(dirname "$(dirname "${values_file}")")"
   helm lint "${chart_dir}" --values "${values_file}"

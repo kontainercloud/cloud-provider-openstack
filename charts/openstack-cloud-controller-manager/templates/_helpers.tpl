@@ -114,8 +114,16 @@ Create cloud-config makro.
 {{- end }}
 
 [LoadBalancer]
+{{- if eq .Values.loadBalancer.mode "internal" }}
+internal-lb = "true"
+{{- else }}
+internal-lb = "false"
+floating-network-id = {{ .Values.loadBalancer.floatingNetworkID | quote }}
+{{- end }}
 {{- range $key, $value := .Values.cloudConfig.loadBalancer }}
+{{- if not (has $key (list "internal-lb" "floating-network-id")) }}
 {{ $key }} = {{ $value | quote }}
+{{- end }}
 {{- end }}
 
 [BlockStorage]
@@ -147,3 +155,23 @@ Path of the kubeconfig of the cluster the controller manages, when it does not r
 {{- define "occm.kubeconfigPath" -}}
 {{- printf "%s/kubeconfig" (trimSuffix "/" .Values.kubeconfig.mountPath) -}}
 {{- end }}
+
+{{/*
+Check the load balancer mode. Only checked when the chart writes cloud.conf: a
+Secret brought along with secret.create=false carries its own settings.
+*/}}
+{{- define "occm.validateLoadBalancer" -}}
+{{- if and .Values.secret.create (not .Values.cloudConfigContents) -}}
+{{- if not (has .Values.loadBalancer.mode (list "external" "internal")) -}}
+{{- fail (printf "loadBalancer.mode must be external or internal, got %q" .Values.loadBalancer.mode) -}}
+{{- end -}}
+{{- if and (eq .Values.loadBalancer.mode "external") (not .Values.loadBalancer.floatingNetworkID) -}}
+{{- fail "loadBalancer.floatingNetworkID is required when loadBalancer.mode is external: floating IPs are allocated from that network" -}}
+{{- end -}}
+{{- range $key := list "internal-lb" "floating-network-id" -}}
+{{- if hasKey ($.Values.cloudConfig.loadBalancer | default dict) $key -}}
+{{- fail (printf "cloudConfig.loadBalancer.%s is set from loadBalancer.mode and loadBalancer.floatingNetworkID, remove it from cloudConfig" $key) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

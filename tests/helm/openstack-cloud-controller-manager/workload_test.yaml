@@ -12,6 +12,9 @@ release:
   name: mycluster
   namespace: capi-ns
 
+set:
+  loadBalancer.floatingNetworkID: 33333333-3333-4333-8333-333333333333
+
 chart:
   version: 1.2.3
   appVersion: v4.5.6

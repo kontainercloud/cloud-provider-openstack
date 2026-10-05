@@ -415,6 +415,13 @@ func (os *OpenStack) LoadBalancer() (cloudprovider.LoadBalancer, bool) {
 		return nil, false
 	}
 
+	// External load balancers always get a floating IP; without a network to
+	// allocate it from none of them could be provisioned.
+	if !os.lbOpts.InternalLB && os.lbOpts.FloatingNetworkID == "" {
+		klog.Fatalf("Config error: floating-network-id is not set in the [LoadBalancer] section, it is required unless internal-lb is true")
+		return nil, false
+	}
+
 	tenantID := os.lbOpts.TenantID
 	if tenantID == "" {
 		tenantID = os.projectID

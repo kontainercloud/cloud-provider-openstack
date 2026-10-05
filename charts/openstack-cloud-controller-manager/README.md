@@ -6,8 +6,7 @@ By default the controller runs in a Cluster API management ("infra") cluster
 and manages one workload cluster from there: one release per workload cluster,
 installed into the namespace of its `Cluster` object. It reaches the workload
 cluster through the kubeconfig Secret Cluster API keeps for it, and OpenStack
-through `cloud.conf`. To run it inside the cluster it manages instead, see
-[Running inside the managed cluster](#running-inside-the-managed-cluster).
+through `cloud.conf`.
 
 ## How To install
 
@@ -18,9 +17,10 @@ You need to configure an `openstack-ccm.yaml` values file with at least:
   - with password: `cloudConfig.global.username` and `cloudconfig.global.password`
   - with application credentials: (`cloudConfig.global.application-credential-id` or `cloudConfig.global.application-credential-name`) and `cloudConfig.global.application-credential-secret`
 - Load balancing
+  - `loadBalancer.mode`: `external` (default) or `internal`, see below
+  - `loadBalancer.floatingNetworkID` with the ID of the external network, required in `external` mode
   - `cloudConfig.loadBalancer.rpc-server-addr` with the address of the load balancer service, for example `loadbalancer-api.lb-system.svc:8080`
   - `cloudConfig.loadBalancer.api-key` if the load balancer service requires one
-  - `cloudConfig.loadBalancer.floating-network-id` if the project has more than one external network
 
 Health checks are attached to TCP listeners by default. Set `cloudConfig.loadBalancer.create-monitor: false` to turn them off.
 
@@ -59,6 +59,37 @@ Things to keep in mind:
   cluster, while the controller still runs, so that their load balancers are
   removed. Uninstall the release after the cluster is gone.
 
+## Load balancer mode
+
+`loadBalancer.mode` decides for every `LoadBalancer` Service of the workload cluster:
+
+| Mode | Floating IP | Service is reached at | Required |
+| --- | --- | --- | --- |
+| `external` (default) | always allocated from `loadBalancer.floatingNetworkID` | the floating IP | `loadBalancer.floatingNetworkID` |
+| `internal` | never; an existing one is released | the load balancer's address on the cluster subnet | nothing |
+
+```yaml
+# external
+loadBalancer:
+  mode: external
+  floatingNetworkID: 33333333-3333-4333-8333-333333333333
+```
+
+```yaml
+# internal
+loadBalancer:
+  mode: internal
+```
+
+The chart writes `internal-lb` and `floating-network-id` into the `[LoadBalancer]`
+section of `cloud.conf` from these values, and refuses to render when
+`external` has no floating network. A Service cannot choose another mode: the
+`service.beta.kubernetes.io/openstack-internal-load-balancer` annotation is
+ignored with a warning event. When you bring your own Secret
+(`secret.create: false`), set `internal-lb` and `floating-network-id` in it
+yourself; the controller refuses to start in external mode without a floating
+network.
+
 ## Using an external secret
 
 In order to use an external secret for the OCCM:
@@ -75,65 +106,6 @@ Create the secret with:
 ```sh
 kubectl create secret -n <cluster-namespace> generic cloud-config --from-file=./cloud.conf
 ```
-
-## Running inside the managed cluster
-
-To run the controller inside the cluster it manages, as a DaemonSet on the
-control plane nodes with the in-cluster credentials, use these values:
-
-```yaml
-kind: DaemonSet
-kubeconfig:
-  enabled: false
-rbac:
-  create: true
-cluster:
-  name: kubernetes
-secret:
-  name: cloud-config
-serviceAccountName: cloud-controller-manager
-fullnameOverride: openstack-cloud-controller-manager
-hostNetwork: true
-dnsPolicy: ClusterFirstWithHostNet
-nodeSelector:
-  node-role.kubernetes.io/control-plane: ""
-tolerations:
-  - key: node.cloudprovider.kubernetes.io/uninitialized
-    value: "true"
-    effect: NoSchedule
-  - key: node-role.kubernetes.io/control-plane
-    effect: NoSchedule
-priorityClassName: system-node-critical
-extraVolumes:
-  - name: flexvolume-dir
-    hostPath:
-      path: /usr/libexec/kubernetes/kubelet-plugins/volume/exec
-  - name: k8s-certs
-    hostPath:
-      path: /etc/kubernetes/pki
-extraVolumeMounts:
-  - name: flexvolume-dir
-    mountPath: /usr/libexec/kubernetes/kubelet-plugins/volume/exec
-    readOnly: true
-  - name: k8s-certs
-    mountPath: /etc/kubernetes/pki
-    readOnly: true
-enabledControllers:
-  - cloud-node
-  - cloud-node-lifecycle
-  - route
-  - service
-```
-
-and install into `kube-system`:
-
-```sh
-helm install openstack-ccm cpo/openstack-cloud-controller-manager \
-  --namespace kube-system --values openstack-ccm.yaml --values in-cluster.yaml
-```
-
-To deploy OCCM to worker nodes only in this mode (e.g. when the controlplane is
-isolated), keep only the first toleration above.
 
 ## Unsupported configurations
 

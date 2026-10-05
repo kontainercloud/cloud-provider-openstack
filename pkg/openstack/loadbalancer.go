@@ -43,7 +43,6 @@ import (
 	cpoerrors "k8s.io/cloud-provider-openstack/pkg/util/errors"
 	"k8s.io/cloud-provider-openstack/pkg/util/lbapi"
 	lbv1 "k8s.io/cloud-provider-openstack/pkg/util/lbapi/gen"
-	openstackutil "k8s.io/cloud-provider-openstack/pkg/util/openstack"
 )
 
 const (
@@ -535,8 +534,9 @@ func (lbaas *LbaasV2) createLoadBalancer(ctx context.Context, name string, servi
 	}
 
 	// A floating IP is only allocated when the request carries the fip field,
-	// even an empty one, which stands for "pick any address".
-	if !svcConf.internal && svcConf.lbPublicNetworkID != "" {
+	// even an empty one, which stands for "pick any address". checkService
+	// makes sure an external load balancer has a floating network.
+	if !svcConf.internal {
 		createReq.Fip = ptr.To(svcConf.requestedFloatingIP)
 		createReq.FipNetworkId = ptr.To(svcConf.lbPublicNetworkID)
 	}
@@ -780,8 +780,7 @@ func (lbaas *LbaasV2) ensureFloatingIP(ctx context.Context, service *corev1.Serv
 
 	// we cannot add a FIP to this LB without knowing the external network
 	if svcConf.lbPublicNetworkID == "" {
-		klog.V(2).InfoS("No floating network configured, using the VIP of the load balancer", "lbID", lb.GetId(), "service", klog.KObj(service))
-		return lb.GetIp(), nil
+		return "", fmt.Errorf("load balancer %s of service %s needs a floating IP but no floating network is configured", lb.GetId(), serviceName)
 	}
 
 	klog.InfoS("Allocating a floating IP for the load balancer", "lbID", lb.GetId(), "floatingNetwork", svcConf.lbPublicNetworkID, "service", klog.KObj(service))
@@ -865,14 +864,20 @@ func (lbaas *LbaasV2) checkService(ctx context.Context, service *corev1.Service,
 		return fmt.Errorf("IPv6 load balancers are not supported, Service %s must use IPv4 as its first IP family", serviceName)
 	}
 
-	// If in the config file internal-lb=true, user is not allowed to create external service.
-	if lbaas.opts.InternalLB {
-		if !getBoolFromServiceAnnotation(service, ServiceAnnotationLoadBalancerInternal, false) {
-			klog.V(3).InfoS("Enforcing internal LB", "annotation", true, "config", false)
+	// The deployment mode decides for every Service: with internal-lb=true no
+	// load balancer gets a floating IP, otherwise every load balancer gets one.
+	// A Service cannot choose differently.
+	svcConf.internal = lbaas.opts.InternalLB
+	if _, ok := service.Annotations[ServiceAnnotationLoadBalancerInternal]; ok {
+		if getBoolFromServiceAnnotation(service, ServiceAnnotationLoadBalancerInternal, svcConf.internal) != svcConf.internal {
+			mode := "external"
+			if svcConf.internal {
+				mode = "internal"
+			}
+			msg := "Annotation %s of Service %s is ignored, the load balancers of this cluster are %s"
+			lbaas.eventRecorder.Eventf(service, corev1.EventTypeWarning, eventLBInternalAnnotationIgnored, msg, ServiceAnnotationLoadBalancerInternal, serviceName, mode)
+			klog.Warningf(msg, ServiceAnnotationLoadBalancerInternal, serviceName, mode)
 		}
-		svcConf.internal = true
-	} else {
-		svcConf.internal = getBoolFromServiceAnnotation(service, ServiceAnnotationLoadBalancerInternal, lbaas.opts.InternalLB)
 	}
 
 	svcConf.lbNetworkID = getStringFromServiceAnnotation(service, ServiceAnnotationLoadBalancerNetworkID, lbaas.opts.NetworkID)
@@ -900,17 +905,11 @@ func (lbaas *LbaasV2) checkService(ctx context.Context, service *corev1.Service,
 	if !svcConf.internal {
 		klog.V(4).Infof("Ensure an external loadbalancer service")
 
+		// External load balancers always get a floating IP, so the network to
+		// allocate it from is required.
 		floatingNetworkID := getStringFromServiceAnnotation(service, ServiceAnnotationLoadBalancerFloatingNetworkID, lbaas.opts.FloatingNetworkID)
-
-		// If there's no annotation and configuration, try to autodetect the FIP network by looking up external nets
 		if floatingNetworkID == "" {
-			var err error
-			floatingNetworkID, err = openstackutil.GetFloatingNetworkID(ctx, lbaas.network)
-			if err != nil {
-				msg := "Failed to find floating-network-id for Service %s: %v"
-				lbaas.eventRecorder.Eventf(service, corev1.EventTypeWarning, eventLBExternalNetworkSearchFailed, msg, serviceName, err)
-				klog.Warningf(msg, serviceName, err)
-			}
+			return fmt.Errorf("no floating network for the external load balancer of service %s: set floating-network-id in the [LoadBalancer] section of the cloud config", serviceName)
 		}
 
 		svcConf.lbPublicNetworkID = floatingNetworkID

@@ -1729,8 +1729,9 @@ func TestEnsureLoadBalancerCreates(t *testing.T) {
 func TestEnsureLoadBalancerCreatesInternal(t *testing.T) {
 	client := newFakeLBClient()
 	svc := newTestService()
-	svc.Annotations = map[string]string{ServiceAnnotationLoadBalancerInternal: "true"}
 	lbaas, _ := newTestLbaas(t, client, svc)
+	lbaas.opts.InternalLB = true
+	lbaas.opts.FloatingNetworkID = ""
 	lbaas.opts.SecurityGroupIDs = "55555555-5555-4555-8555-555555555555, 66666666-6666-4666-8666-666666666666"
 	lbaas.opts.QoSPolicyID = "77777777-7777-4777-8777-777777777777"
 	lbaas.opts.VPCCIDR = "10.0.0.0/16"
@@ -1985,15 +1986,38 @@ func TestEnsureFloatingIP(t *testing.T) {
 		assert.Equal(t, "203.0.113.77", client.allocateReqs[0].Fip)
 	})
 
-	t.Run("external Service without a floating network uses the VIP", func(t *testing.T) {
+	t.Run("external Service without a floating network is an error", func(t *testing.T) {
 		client := newFakeLBClient()
 		svc := newTestService()
 		lbaas, _ := newTestLbaas(t, client, svc)
 
-		addr, err := lbaas.ensureFloatingIP(context.Background(), svc, &lbv1.LoadBalancer{Id: lbID, Ip: "10.0.0.5"}, &serviceConfig{})
-		require.NoError(t, err)
-		assert.Equal(t, "10.0.0.5", addr)
+		_, err := lbaas.ensureFloatingIP(context.Background(), svc, &lbv1.LoadBalancer{Id: lbID, Ip: "10.0.0.5"}, &serviceConfig{})
+		assert.ErrorContains(t, err, "no floating network")
 		assert.Empty(t, client.allocateReqs)
+	})
+}
+
+func TestLoadBalancerMode(t *testing.T) {
+	t.Run("external mode ignores the internal annotation", func(t *testing.T) {
+		client := newFakeLBClient()
+		svc := newTestService()
+		svc.Annotations = map[string]string{ServiceAnnotationLoadBalancerInternal: "true"}
+		lbaas, _ := newTestLbaas(t, client, svc)
+
+		_, err := lbaas.EnsureLoadBalancer(context.Background(), testLBClusterName, svc, newTestNodes("10.0.0.11"))
+		require.NoError(t, err)
+		assert.NotNil(t, client.createReqs[0].Fip, "an external load balancer always gets a floating IP")
+	})
+
+	t.Run("external mode requires a floating network", func(t *testing.T) {
+		client := newFakeLBClient()
+		svc := newTestService()
+		lbaas, _ := newTestLbaas(t, client, svc)
+		lbaas.opts.FloatingNetworkID = ""
+
+		_, err := lbaas.EnsureLoadBalancer(context.Background(), testLBClusterName, svc, newTestNodes("10.0.0.11"))
+		assert.ErrorContains(t, err, "floating-network-id")
+		assert.Empty(t, client.createReqs)
 	})
 }
 
