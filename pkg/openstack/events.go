@@ -21,4 +21,5 @@ const (
 	eventLBInternalAnnotationIgnored = "LoadBalancerInternalAnnotationIgnored"
 	eventLBSourceRangesIgnored       = "LoadBalancerSourceRangesIgnored"
 	eventLBAnnotationIgnored         = "LoadBalancerAnnotationIgnored"
+	eventLBNetworkChangeIgnored      = "LoadBalancerNetworkChangeIgnored"
 )

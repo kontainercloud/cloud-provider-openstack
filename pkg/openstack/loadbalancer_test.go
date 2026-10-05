@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -1199,6 +1200,8 @@ type fakeLBClient struct {
 	getErr    error
 	listErr   error
 	deleteErr error
+	updateErr error
+	nextID    int
 
 	createReqs   []*lbv1.CreateLoadBalancerRequest
 	listReqs     []*lbv1.ListLoadBalancersRequest
@@ -1234,10 +1237,12 @@ func (f *fakeLBClient) CreateLoadBalancer(_ context.Context, req *lbv1.CreateLoa
 		}
 	}
 
+	spec := proto.Clone(req.Spec).(*lbv1.LoadBalancerSpec)
+	f.assignIDs(spec.Listeners)
 	lb := &lbv1.LoadBalancer{
 		Id:    fmt.Sprintf("00000000-0000-4000-8000-%012d", len(f.keys)+1),
 		Name:  req.Name,
-		Spec:  req.Spec,
+		Spec:  spec,
 		State: f.createState,
 		Ip:    "10.0.0.5",
 	}
@@ -1303,8 +1308,48 @@ func (f *fakeLBClient) ListLoadBalancers(_ context.Context, req *lbv1.ListLoadBa
 	return resp, nil
 }
 
+// assignIDs gives every listener, rule and backend without an ID a new one,
+// as the service does.
+func (f *fakeLBClient) assignIDs(listeners []*lbv1.Listener) {
+	next := func() string {
+		f.nextID++
+		return fmt.Sprintf("11111111-0000-4000-8000-%012d", f.nextID)
+	}
+	for _, l := range listeners {
+		if l.Id == "" {
+			l.Id = next()
+		}
+		for _, r := range l.Rules {
+			if r.Id == "" {
+				r.Id = next()
+			}
+			for _, b := range r.Backends {
+				if b.Id == "" {
+					b.Id = next()
+				}
+			}
+		}
+	}
+}
+
 func (f *fakeLBClient) UpdateLoadBalancer(_ context.Context, req *lbv1.UpdateLoadBalancerRequest) (*lbv1.UpdateLoadBalancerResponse, error) {
 	f.updateReqs = append(f.updateReqs, req)
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	lb, ok := f.lbs[req.Id]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "load balancer %q not found", req.Id)
+	}
+	listeners := make([]*lbv1.Listener, 0, len(req.Listeners))
+	for _, l := range req.Listeners {
+		listeners = append(listeners, proto.Clone(l).(*lbv1.Listener))
+	}
+	f.assignIDs(listeners)
+	lb.Spec.Listeners = listeners
+	// The fake provisions instantly.
+	lb.State = lbv1.State_STATE_READY
+	lb.Error = ""
 	return &lbv1.UpdateLoadBalancerResponse{Id: req.Id, State: lbv1.State_STATE_UPDATING}, nil
 }
 
@@ -2189,4 +2234,101 @@ func TestCreateLoadBalancerStatus(t *testing.T) {
 		got := lbaas.createLoadBalancerStatus(newTestService(), "203.0.113.10")
 		assert.Equal(t, []corev1.LoadBalancerIngress{{Hostname: "203.0.113.10.nip.io"}}, got.Ingress)
 	})
+}
+
+func TestConfigHash(t *testing.T) {
+	svcConf := &serviceConfig{algorithm: lbv1.Algorithm_ALGORITHM_ROUND_ROBIN}
+	listeners := func(addresses ...string) []*lbv1.Listener {
+		l, err := buildListeners(newTestService(), newTestNodes(addresses...), svcConf)
+		require.NoError(t, err)
+		return l
+	}
+	hash := configHash(&lbv1.LoadBalancerSpec{Listeners: listeners("10.0.0.11", "10.0.0.12")})
+
+	assert.Equal(t, hash, configHash(&lbv1.LoadBalancerSpec{Listeners: listeners("10.0.0.12", "10.0.0.11")}), "node order does not matter")
+	assert.NotEqual(t, hash, configHash(&lbv1.LoadBalancerSpec{Listeners: listeners("10.0.0.11")}), "a node change does")
+
+	withIDs := &lbv1.LoadBalancerSpec{Listeners: listeners("10.0.0.11", "10.0.0.12"), TenantId: testTenantID, SubnetId: testSubnetID}
+	newFakeLBClient().assignIDs(withIDs.Listeners)
+	assert.Equal(t, hash, configHash(withIDs), "IDs and the immutable fields are left out")
+
+	assert.NotEqual(t, hash, configHash(&lbv1.LoadBalancerSpec{Listeners: listeners("10.0.0.11", "10.0.0.12"), ClientConnLimit: 100}))
+}
+
+func TestMergeListenerIDs(t *testing.T) {
+	svcConf := &serviceConfig{algorithm: lbv1.Algorithm_ALGORITHM_ROUND_ROBIN}
+	current, err := buildListeners(newTestService(), newTestNodes("10.0.0.11"), svcConf)
+	require.NoError(t, err)
+	newFakeLBClient().assignIDs(current)
+
+	svc := newTestService()
+	svc.Spec.Ports[1].Port = 5353
+	desired, err := buildListeners(svc, newTestNodes("10.0.0.11", "10.0.0.12"), svcConf)
+	require.NoError(t, err)
+
+	merged := mergeListenerIDs(desired, current)
+	assert.Equal(t, current[0].Id, merged[0].Id, "the TCP listener keeps its IDs")
+	assert.Equal(t, current[0].Rules[0].Id, merged[0].Rules[0].Id)
+	assert.Equal(t, current[0].Rules[0].Backends[0].Id, merged[0].Rules[0].Backends[0].Id)
+	assert.Len(t, merged[0].Rules[0].Backends[0].Endpoints, 2)
+	assert.Empty(t, merged[1].Id, "a listener on a new port is created")
+	assert.Empty(t, desired[0].Id, "desired is not modified")
+}
+
+func TestEnsureLoadBalancerUpdates(t *testing.T) {
+	client := newFakeLBClient()
+	svc := newTestService()
+	lbaas, _ := newTestLbaas(t, client, svc)
+	ensure := func(addresses ...string) error {
+		_, err := lbaas.EnsureLoadBalancer(context.Background(), testLBClusterName, svc, newTestNodes(addresses...))
+		return err
+	}
+
+	require.NoError(t, ensure("10.0.0.11"))
+	require.NoError(t, ensure("10.0.0.11"))
+	assert.Empty(t, client.updateReqs, "nothing changed, nothing is sent")
+
+	lb := client.lbs["00000000-0000-4000-8000-000000000001"]
+	listenerID := lb.Spec.Listeners[0].Id
+	require.NoError(t, ensure("10.0.0.11", "10.0.0.12"))
+	require.Len(t, client.updateReqs, 1)
+	req := client.updateReqs[0]
+	assert.Equal(t, listenerID, req.Listeners[0].Id, "the listener is updated in place")
+	assert.Len(t, req.Listeners[0].Rules[0].Backends[0].Endpoints, 2)
+	assert.Equal(t, listenerID, lb.Spec.Listeners[0].Id)
+
+	lb.State = lbv1.State_STATE_PENDING
+	assert.ErrorContains(t, ensure("10.0.0.11"), "not READY")
+	assert.Len(t, client.updateReqs, 1, "no update while the load balancer is provisioned")
+
+	lb.State = lbv1.State_STATE_FAILED
+	require.NoError(t, ensure("10.0.0.11"), "a changed configuration retries a failed load balancer")
+	assert.Len(t, client.updateReqs, 2)
+
+	client.updateErr = status.Error(codes.Unavailable, "down")
+	assert.Error(t, ensure("10.0.0.13"))
+	client.updateErr = nil
+	require.NoError(t, ensure("10.0.0.13"))
+	assert.Len(t, client.updateReqs, 4, "a failed update is sent again")
+}
+
+func TestUpdateLoadBalancer(t *testing.T) {
+	client := newFakeLBClient()
+	svc := newTestService()
+	lbaas, kclient := newTestLbaas(t, client, svc)
+	_, err := lbaas.EnsureLoadBalancer(context.Background(), testLBClusterName, svc, newTestNodes("10.0.0.11"))
+	require.NoError(t, err)
+	stored, err := kclient.CoreV1().Services("default").Get(context.Background(), "web", v1.GetOptions{})
+	require.NoError(t, err)
+
+	client.listReqs = nil
+	require.NoError(t, lbaas.UpdateLoadBalancer(context.Background(), testLBClusterName, stored, newTestNodes("10.0.0.11")))
+	assert.Empty(t, client.updateReqs)
+	assert.Empty(t, client.listReqs, "an unchanged Service costs no call at all")
+
+	require.NoError(t, lbaas.UpdateLoadBalancer(context.Background(), testLBClusterName, stored, newTestNodes("10.0.0.11", "10.0.0.12")))
+	require.Len(t, client.updateReqs, 1)
+	assert.Len(t, client.updateReqs[0].Listeners[0].Rules[0].Backends[0].Endpoints, 2)
+	assert.NotEqual(t, storedAnnotations(t, kclient)[ServiceAnnotationLoadBalancerConfigHash], svc.Annotations[ServiceAnnotationLoadBalancerConfigHash],
+		"the new hash is saved")
 }

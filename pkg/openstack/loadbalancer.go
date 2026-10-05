@@ -88,6 +88,9 @@ const (
 	// ServiceAnnotationLoadBalancerCreateAttempt counts the creations of the Service's load balancer. It feeds
 	// the idempotency key of the create request and is written by the controller.
 	ServiceAnnotationLoadBalancerCreateAttempt = "loadbalancer.openstack.org/create-attempt"
+	// ServiceAnnotationLoadBalancerConfigHash fingerprints the configuration the load balancer service last
+	// accepted for the Service. An update is only sent when it changes. It is written by the controller.
+	ServiceAnnotationLoadBalancerConfigHash = "loadbalancer.openstack.org/config-hash"
 
 	// ServiceAnnotationLoadBalancerTags is not supported by the load balancer service.
 	ServiceAnnotationLoadBalancerTags = "loadbalancer.openstack.org/load-balancer-tags"
@@ -520,12 +523,7 @@ func (lbaas *LbaasV2) buildLoadBalancerSpec(service *corev1.Service, nodes []*co
 
 // createLoadBalancer creates the fully populated load balancer of the Service
 // and waits for it to be ready.
-func (lbaas *LbaasV2) createLoadBalancer(ctx context.Context, name string, service *corev1.Service, nodes []*corev1.Node, svcConf *serviceConfig) (*lbv1.LoadBalancer, error) {
-	spec, err := lbaas.buildLoadBalancerSpec(service, nodes, svcConf)
-	if err != nil {
-		return nil, err
-	}
-
+func (lbaas *LbaasV2) createLoadBalancer(ctx context.Context, name string, service *corev1.Service, spec *lbv1.LoadBalancerSpec, svcConf *serviceConfig) (*lbv1.LoadBalancer, error) {
 	attempt := getCreateAttempt(service)
 	createReq := &lbv1.CreateLoadBalancerRequest{
 		Name:           name,
@@ -563,8 +561,70 @@ func (lbaas *LbaasV2) createLoadBalancer(ctx context.Context, name string, servi
 	// Make sure the LB ID is saved even when the load balancer never becomes ready.
 	lbaas.updateServiceAnnotation(service, ServiceAnnotationLoadBalancerID, resp.GetId())
 	lbaas.updateServiceAnnotation(service, ServiceAnnotationLoadBalancerCreateAttempt, strconv.Itoa(attempt))
+	lbaas.updateServiceAnnotation(service, ServiceAnnotationLoadBalancerConfigHash, configHash(spec))
 
 	return lbaas.waitLoadBalancerReady(ctx, resp.GetId())
+}
+
+// updateLoadBalancerConfig brings the configuration of an existing load
+// balancer in line with spec. Every update makes the service provision the
+// load balancer again, even an update that changes nothing, so it is only
+// sent when the hash of the configuration differs from the one recorded on
+// the Service. When wait is set, the load balancer is returned once it is
+// ready again.
+func (lbaas *LbaasV2) updateLoadBalancerConfig(ctx context.Context, service *corev1.Service, loadbalancer *lbv1.LoadBalancer, spec *lbv1.LoadBalancerSpec, wait bool) (*lbv1.LoadBalancer, error) {
+	hash := configHash(spec)
+	if getStringFromServiceAnnotation(service, ServiceAnnotationLoadBalancerConfigHash, "") == hash {
+		return loadbalancer, nil
+	}
+
+	// An update sent while the load balancer is still being provisioned
+	// strands it: it ends up failed and deleted. A failed one is updated, the
+	// update is its retry.
+	switch loadbalancer.GetState() {
+	case lbv1.State_STATE_READY, lbv1.State_STATE_FAILED:
+	default:
+		return nil, fmt.Errorf("load balancer %s is not READY, current state: %s; its configuration is updated once it is", loadbalancer.GetId(), loadBalancerStateDetail(loadbalancer))
+	}
+
+	current := loadbalancer.GetSpec()
+	if spec.GetSubnetId() != "" && current.GetSubnetId() != "" && !sameID(spec.GetSubnetId(), current.GetSubnetId()) ||
+		spec.GetNetworkId() != "" && current.GetNetworkId() != "" && !sameID(spec.GetNetworkId(), current.GetNetworkId()) {
+		msg := "Load balancer %s of Service %s/%s stays on network %s subnet %s, the network and subnet of a load balancer cannot be changed; delete and recreate the Service to move it"
+		lbaas.eventRecorder.Eventf(service, corev1.EventTypeWarning, eventLBNetworkChangeIgnored, msg, loadbalancer.GetId(), service.Namespace, service.Name, current.GetNetworkId(), current.GetSubnetId())
+		klog.Warningf(msg, loadbalancer.GetId(), service.Namespace, service.Name, current.GetNetworkId(), current.GetSubnetId())
+	}
+
+	klog.InfoS("Updating load balancer", "lbID", loadbalancer.GetId(), "service", klog.KObj(service))
+	mc := metrics.NewMetricContext("loadbalancer", "update")
+	_, err := lbaas.lb.UpdateLoadBalancer(ctx, &lbv1.UpdateLoadBalancerRequest{
+		Id:                    loadbalancer.GetId(),
+		Listeners:             mergeListenerIDs(spec.GetListeners(), current.GetListeners()),
+		ClientConnLimit:       ptr.To(spec.GetClientConnLimit()),
+		SecurityGroupDisabled: ptr.To(spec.GetSecurityGroupDisabled()),
+		SecurityGroupIds:      spec.GetSecurityGroupIds(),
+		QosPolicyDisabled:     ptr.To(spec.GetQosPolicyDisabled()),
+		QosPolicyId:           ptr.To(spec.GetQosPolicyId()),
+		VpcCidr:               ptr.To(spec.GetVpcCidr()),
+	})
+	if mc.ObserveRequest(err) != nil {
+		return nil, fmt.Errorf("failed to update load balancer %s: %v", loadbalancer.GetId(), err)
+	}
+
+	// Recorded only once the service accepted the update, so that a failed
+	// one is sent again by the next reconcile.
+	lbaas.updateServiceAnnotation(service, ServiceAnnotationLoadBalancerConfigHash, hash)
+
+	if !wait {
+		return loadbalancer, nil
+	}
+	return lbaas.waitLoadBalancerReady(ctx, loadbalancer.GetId())
+}
+
+// sameID compares two OpenStack UUIDs, which the service accepts with or without dashes.
+func sameID(a, b string) bool {
+	norm := func(s string) string { return strings.ToLower(strings.ReplaceAll(s, "-", "")) }
+	return norm(a) == norm(b)
 }
 
 // GetLoadBalancer returns whether the specified load balancer exists and its status
@@ -1030,6 +1090,11 @@ func (lbaas *LbaasV2) ensureLoadBalancer(ctx context.Context, clusterName string
 	// apply node-selector to a list of nodes
 	filteredNodes := filterNodes(nodes, svcConf.nodeSelectors)
 
+	spec, err := lbaas.buildLoadBalancerSpec(service, filteredNodes, svcConf)
+	if err != nil {
+		return nil, err
+	}
+
 	lbName := lbaas.GetLoadBalancerName(ctx, clusterName, service)
 	svcConf.lbName = lbName
 	serviceName := fmt.Sprintf("%s/%s", service.Namespace, service.Name)
@@ -1065,7 +1130,7 @@ func (lbaas *LbaasV2) ensureLoadBalancer(ctx context.Context, clusterName string
 				return nil, fmt.Errorf("error getting loadbalancer for Service %s: %v", serviceName, err)
 			}
 			klog.InfoS("Creating loadbalancer", "lbName", lbName, "service", klog.KObj(service))
-			loadbalancer, err = lbaas.createLoadBalancer(ctx, lbName, service, filteredNodes, svcConf)
+			loadbalancer, err = lbaas.createLoadBalancer(ctx, lbName, service, spec, svcConf)
 			if err != nil {
 				return nil, fmt.Errorf("error creating loadbalancer %s: %v", lbName, err)
 			}
@@ -1075,6 +1140,14 @@ func (lbaas *LbaasV2) ensureLoadBalancer(ctx context.Context, clusterName string
 
 	// Make sure LB ID will be saved at this point.
 	lbaas.updateServiceAnnotation(service, ServiceAnnotationLoadBalancerID, loadbalancer.GetId())
+
+	// This is an existing load balancer, bring its configuration in line with the Service and the nodes.
+	if !createNewLB {
+		loadbalancer, err = lbaas.updateLoadBalancerConfig(ctx, service, loadbalancer, spec, true)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	if loadbalancer.GetState() != lbv1.State_STATE_READY {
 		return nil, fmt.Errorf("load balancer %s is not READY, current state: %s", loadbalancer.GetId(), loadBalancerStateDetail(loadbalancer))
@@ -1120,22 +1193,66 @@ func (lbaas *LbaasV2) EnsureLoadBalancer(ctx context.Context, clusterName string
 	return status, mc.ObserveReconcile(err)
 }
 
-func (lbaas *LbaasV2) updateLoadBalancer(_ context.Context, clusterName string, service *corev1.Service, nodes []*corev1.Node) error {
+func (lbaas *LbaasV2) updateLoadBalancer(ctx context.Context, clusterName string, service *corev1.Service, nodes []*corev1.Node) (err error) {
 	svcConf := new(serviceConfig)
 	if err := lbaas.checkServiceUpdate(service, svcConf); err != nil {
 		return err
 	}
 
+	// Save the new configuration hash on the Service in the end.
+	patcher := newServicePatcher(lbaas.kclient, service)
+	defer func() { err = patcher.Patch(ctx, err) }()
+
 	// apply node-selector to a list of nodes
 	filteredNodes := filterNodes(nodes, svcConf.nodeSelectors)
 
 	serviceName := fmt.Sprintf("%s/%s", service.Namespace, service.Name)
+	klog.V(2).Infof("Updating %d nodes for Service %s in cluster %s", len(filteredNodes), serviceName, clusterName)
 
-	// TODO: send the changed endpoints with UpdateLoadBalancer. This needs the
-	// change detection (hash of the configuration) and the grafting of the
-	// IDs of the existing listeners, both of which are not implemented yet.
-	// Until then node changes do not reach an existing load balancer.
-	klog.Warningf("Not updating the load balancer of Service %s in cluster %s with %d nodes: updating load balancers is not implemented yet", serviceName, clusterName, len(filteredNodes))
+	spec, err := lbaas.buildLoadBalancerSpec(service, filteredNodes, svcConf)
+	if err != nil {
+		return err
+	}
+
+	// The service controller calls this for every LoadBalancer Service on
+	// every node change; for most of them nothing changes.
+	if getStringFromServiceAnnotation(service, ServiceAnnotationLoadBalancerConfigHash, "") == configHash(spec) {
+		return nil
+	}
+
+	// Get load balancer
+	lbName := lbaas.GetLoadBalancerName(ctx, clusterName, service)
+	var loadbalancer *lbv1.LoadBalancer
+	if svcConf.lbID != "" {
+		loadbalancer, err = getLoadbalancerByID(ctx, lbaas.lb, svcConf.lbID)
+	} else {
+		loadbalancer, err = getLoadbalancerByName(ctx, lbaas.lb, svcConf.tenantID, lbName)
+	}
+	if err != nil {
+		return fmt.Errorf("failed to get the load balancer of service %s: %v", serviceName, err)
+	}
+	if isLoadBalancerGone(loadbalancer) {
+		return fmt.Errorf("load balancer %s of service %s does not exist anymore", loadbalancer.GetId(), serviceName)
+	}
+	if loadbalancer.GetName() != lbName {
+		return fmt.Errorf("load balancer %s (%s) in annotation %s was not created for Service %s", loadbalancer.GetId(), loadbalancer.GetName(), ServiceAnnotationLoadBalancerID, serviceName)
+	}
+
+	// Node events come in bursts while a cluster scales; the next
+	// EnsureLoadBalancer reports whether the load balancer became ready.
+	if _, err := lbaas.updateLoadBalancerConfig(ctx, service, loadbalancer, spec, false); err != nil {
+		return err
+	}
+
+	if lbaas.opts.ManageSecurityGroups {
+		svcConf.lbMemberSubnetID = loadbalancer.GetSpec().GetSubnetId()
+		if err := lbaas.ensureAndUpdateOctaviaSecurityGroup(ctx, clusterName, service, filteredNodes, svcConf); err != nil {
+			return fmt.Errorf("failed to update Security Group for loadbalancer service %s: %v", serviceName, err)
+		}
+	}
+	// We don't try to lookup and delete the SG here when `manage-security-group=false` as `UpdateLoadBalancer()` is
+	// only called on changes to the list of the Nodes. Deletion of the SG on reconfiguration will be handled by
+	// EnsureLoadBalancer() that is the true LB reconcile function.
 
 	return nil
 }

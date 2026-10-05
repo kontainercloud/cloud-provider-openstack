@@ -154,7 +154,12 @@ func normalizeServerAddr(addr string) (string, error) {
 		return "", fmt.Errorf("load balancer service address is empty")
 	}
 	if !strings.Contains(addr, "://") {
-		return addr, nil
+		// "host:port/" or "host:port/path": only host:port can be dialed.
+		host, _, _ := strings.Cut(addr, "/")
+		if host == "" {
+			return "", fmt.Errorf("invalid load balancer service address %q: no host", addr)
+		}
+		return host, nil
 	}
 
 	u, err := url.Parse(addr)
