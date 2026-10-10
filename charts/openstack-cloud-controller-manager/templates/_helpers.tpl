@@ -6,6 +6,39 @@ Expand the name of the chart.
 {{- end -}}
 
 {{/*
+Name of the chart's objects: the release name, unless overridden. One release
+manages one cluster, so several releases can share a namespace.
+*/}}
+{{- define "occm.fullname" -}}
+{{- if .Values.fullnameOverride -}}
+{{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else if .Values.nameOverride -}}
+{{- .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Name of the managed cluster.
+*/}}
+{{- define "occm.clusterName" -}}
+{{- default .Release.Name .Values.cluster.name -}}
+{{- end -}}
+
+{{- define "occm.serviceAccountName" -}}
+{{- default (include "occm.fullname" .) .Values.serviceAccountName -}}
+{{- end -}}
+
+{{- define "occm.secretName" -}}
+{{- default (printf "%s-cloud-config" (include "occm.clusterName" .)) .Values.secret.name -}}
+{{- end -}}
+
+{{- define "occm.kubeconfigSecretName" -}}
+{{- default (printf "%s-kubeconfig" (include "occm.clusterName" .)) .Values.kubeconfig.secretName -}}
+{{- end -}}
+
+{{/*
 Create chart name and version as used by the chart label.
 */}}
 {{- define "occm.chart" -}}
@@ -67,38 +100,40 @@ Common annotations and pod annotations
 
 
 {{/*
-Create cloud-config makro.
+The lines `key = "value"` of a map, in key order. A key with an empty value is
+left out: the controller treats it like a key that is not set.
+*/}}
+{{- define "occm.keyValues" -}}
+{{- range $key, $value := . }}
+{{- if not (kindIs "invalid" $value) }}
+{{- if ne (toString $value) "" }}
+{{ $key }} = {{ $value | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Create cloud-config makro. The load balancer keys come from the loadBalancer
+values, cloudConfig.loadBalancer adds to them.
 */}}
 {{- define "cloudConfig" -}}
-[Global]
-{{- range $key, $value := .Values.cloudConfig.global }}
-{{ $key }} = {{ $value | quote }}
-{{- end }}
+{{- $lb := .Values.loadBalancer -}}
+{{- $managed := dict "internal-lb" (eq $lb.mode "internal") "rpc-server-addr" $lb.rpcServerAddr "api-key" $lb.apiKey "tenant-id" $lb.tenantID "network-id" $lb.networkID "subnet-id" $lb.subnetID -}}
+{{- if ne $lb.mode "internal" -}}
+{{- $_ := set $managed "floating-network-id" $lb.floatingNetworkID -}}
+{{- end -}}
+[Global]{{ include "occm.keyValues" .Values.cloudConfig.global }}
 
-[Networking]
-{{- range $key, $value := .Values.cloudConfig.networking }}
-{{ $key }} = {{ $value | quote }}
-{{- end }}
+[Networking]{{ include "occm.keyValues" .Values.cloudConfig.networking }}
 
-[LoadBalancer]
-{{- range $key, $value := .Values.cloudConfig.loadBalancer }}
-{{ $key }} = {{ $value | quote }}
-{{- end }}
+[LoadBalancer]{{ include "occm.keyValues" $managed }}{{ include "occm.keyValues" .Values.cloudConfig.loadBalancer }}
 
-[BlockStorage]
-{{- range $key, $value := .Values.cloudConfig.blockStorage }}
-{{ $key }} = {{ $value | quote }}
-{{- end }}
+[BlockStorage]{{ include "occm.keyValues" .Values.cloudConfig.blockStorage }}
 
-[Metadata]
-{{- range $key, $value := .Values.cloudConfig.metadata }}
-{{ $key }} = {{ $value | quote }}
-{{- end }}
+[Metadata]{{ include "occm.keyValues" .Values.cloudConfig.metadata }}
 
-[Route]
-{{- range $key, $value := .Values.cloudConfig.route }}
-{{ $key }} = {{ $value | quote }}
-{{- end }}
+[Route]{{ include "occm.keyValues" .Values.cloudConfig.route }}
 {{- end }}
 
 {{/*
@@ -106,4 +141,11 @@ Generate string of enabled controllers. Might have a trailing comma (,) which ne
 */}}
 {{- define "occm.enabledControllers" }}
 {{- range .Values.enabledControllers -}}{{ . }},{{- end -}}
+{{- end }}
+
+{{/*
+Path of the kubeconfig of the workload cluster in the pod.
+*/}}
+{{- define "occm.kubeconfigPath" -}}
+{{- printf "%s/kubeconfig" (trimSuffix "/" .Values.kubeconfig.mountPath) -}}
 {{- end }}

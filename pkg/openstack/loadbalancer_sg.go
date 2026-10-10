@@ -248,13 +248,9 @@ func (lbaas *LbaasV2) ensureAndUpdateOctaviaSecurityGroup(ctx context.Context, c
 	if netutils.IsIPv6CIDRString(subnet.CIDR) {
 		etherType = rules.EtherType6
 	}
+	// The load balancer proxies the traffic, so the nodes see it coming from
+	// the load balancer's subnet.
 	cidrs := []string{subnet.CIDR}
-	if lbaas.opts.LBProvider == "ovn" {
-		// OVN keeps the source IP of the incoming traffic. This means that we cannot just open the LB range, but we
-		// need to open for the whole world. This can be restricted by using the service.spec.loadBalancerSourceRanges.
-		// svcConf.allowedCIDR will give us the ranges calculated by GetLoadBalancerSourceRanges() earlier.
-		cidrs = svcConf.allowedCIDR
-	}
 
 	existingRules, err := openstackutil.GetSecurityGroupRules(ctx, lbaas.network, rules.ListOpts{SecGroupID: lbSecGroupID})
 	if err != nil {

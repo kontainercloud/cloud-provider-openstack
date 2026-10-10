@@ -1,7 +1,79 @@
-# Values OpenStack Cloud Controller Manager Helm Chart
+# Values of the OpenStack Cloud Controller Manager Helm chart.
 #
-# Define deployment mode for the controller and provide cloud credentials in cloudConfig at the end of the file
+# The chart runs the controller in a Cluster API management cluster (for
+# example a CAPO cluster) and manages one workload cluster from there. Install
+# one release per workload cluster, into the namespace of its Cluster object,
+# and name the release after the cluster (or set cluster.name):
 #
+#   helm install mycluster openstack-cloud-controller-manager \
+#     --namespace <cluster-namespace> --values openstack-ccm.yaml
+#
+# The controller reads
+#   - the workload cluster's kubeconfig from the Secret <cluster>-kubeconfig,
+#     which Cluster API creates,
+#   - its cloud.conf from the Secret <cluster>-cloud-config, which the chart
+#     creates from cloudConfig and loadBalancer (or which you create, with
+#     secret.create=false).
+#
+# The values are checked when the chart is installed, upgraded or linted:
+# values.schema.json checks types, allowed values and ID formats, and
+# templates/validate.yaml checks that the required values are set.
+
+# Name of the workload cluster. Load balancer names are derived from it, so it
+# must be unique among the clusters sharing an OpenStack project. Defaults to
+# the release name.
+cluster:
+  name: ""
+
+# Load balancers of the workload cluster, managed by the load balancer service.
+# All Services of the cluster use the same mode:
+#   external: every load balancer gets a floating IP from floatingNetworkID,
+#             and Services are reached at the floating IP.
+#   internal: no load balancer gets a floating IP, and Services are reached at
+#             the load balancer's address on the cluster subnet.
+# The Service annotation service.beta.kubernetes.io/openstack-internal-load-balancer
+# cannot change the mode; a Service carrying a different value gets a warning event.
+#
+# The load balancer ports have no security groups and no QoS policy, and no
+# VPC CIDR is set. These are what the controller does when security-group-ids,
+# qos-policy-id and vpc-cidr are not set; they can be set under
+# cloudConfig.loadBalancer.
+loadBalancer:
+  mode: external
+  # Address of the load balancer service: host:port or http://host:port.
+  # Required. https:// is not supported, the service only serves plaintext HTTP/2.
+  rpcServerAddr: ""
+  # Bearer token for the load balancer service. No credential is sent when empty.
+  apiKey: ""
+  # Project the load balancers are created in, a UUID. Defaults to the project of
+  # the cloudConfig.global credentials.
+  tenantID: ""
+  # Network and subnet of the workload cluster's nodes, where the load
+  # balancers are created. Required, UUIDs. Cluster API reports both in the
+  # status of the OpenStackCluster.
+  networkID: ""
+  subnetID: ""
+  # External network the floating IPs are allocated from, a UUID. Required when
+  # mode is external, ignored when it is internal.
+  floatingNetworkID: ""
+
+# Number of controller pods. Leader election makes sure only one is active, more
+# than one only shortens the failover.
+replicaCount: 1
+
+# Kubeconfig of the workload cluster. The Secret is mounted and passed as
+# --kubeconfig, --authentication-kubeconfig and --authorization-kubeconfig.
+kubeconfig:
+  # Defaults to <cluster.name>-kubeconfig, the Secret Cluster API keeps for
+  # the workload cluster.
+  secretName: ""
+  secretKey: value
+  mountPath: /etc/kubernetes/occm-kubeconfig
+
+# Override the names of the chart's objects. They default to the release name.
+nameOverride: ""
+fullnameOverride: ""
+
 ## Annotations to apply to all resources
 commonAnnotations: {}
 # commonAnnotations:
@@ -30,13 +102,13 @@ extraEnv: []
 # - name: OS_CCM_REGIONAL
 #   value: "true"
 
-# Set resources for Kubernetes daemonset
+# Set resources for the controller pod
 resources: {}
 # resources:
 #   requests:
 #     cpu: 200m
 
-# Set livenessProbe for Kubernetes daemonset. Used the same port for servicemonitor metrics
+# Set livenessProbe for the controller pod. Used the same port for servicemonitor metrics
 livenessProbe: {}
 # livenessProbe:
 #   httpGet:
@@ -46,27 +118,18 @@ livenessProbe: {}
 # Set readinessProbe in the same way like livenessProbe
 readinessProbe: {}
 
-# Host network access is usually necessary if using metadata service, since not
-# all CNIs support link-local addresses, or if the OpenStack control plane is
-# on a management network that is not advertised to pods. Can be disabled if
-# only the service (Octavia LB) controller is needed.
-hostNetwork: true
+# Run the pod in the host network. Only needed when the pod network of the
+# management cluster cannot reach the OpenStack endpoints.
+hostNetwork: false
 
-# Set to ClusterFirst if hostNetwork is disabled
-dnsPolicy: ClusterFirstWithHostNet
+# Set to ClusterFirstWithHostNet if hostNetwork is enabled
+dnsPolicy: ClusterFirst
 
-# Set nodeSelector where the controller should run, i.e. controlplane nodes
-nodeSelector:
-  node-role.kubernetes.io/control-plane: ""
+# Set nodeSelector where the controller should run
+nodeSelector: {}
 
-# Set tolerations for nodes where the controller should run, i.e. node
-# should be uninitialized, controlplane...
-tolerations:
-  - key: node.cloudprovider.kubernetes.io/uninitialized
-    value: "true"
-    effect: NoSchedule
-  - key: node-role.kubernetes.io/control-plane
-    effect: NoSchedule
+# Set tolerations for nodes where the controller should run
+tolerations: []
 
 # Optional additional annotations to add to the controller Pods.
 podAnnotations: {}
@@ -96,14 +159,15 @@ securityContext:
 # List of controllers should be enabled.
 # Use '*' to enable all controllers.
 # Prefix a controller with '-' to disable it.
+# The route controller needs [Route] router-id and --cluster-cidr, add it only
+# when pod routes are managed through Neutron.
 enabledControllers:
   - cloud-node
   - cloud-node-lifecycle
-  - route
   - service
 
 # Any extra arguments for openstack-cloud-controller-manager
-controllerExtraArgs: {}
+controllerExtraArgs: ""
 # controllerExtraArgs: |-
 #   - --cluster-name=my-cluster
 
@@ -113,7 +177,7 @@ serviceMonitor: {}
 #   enabled: true
 #   additionalLabels: {}
 
-# Create a secret resource cloud-config (or other name) to store credentials and settings from cloudConfig
+# Create a secret resource <cluster.name>-cloud-config (or other name) to store credentials and settings from cloudConfig
 # You can also provide your own secret (not created by the Helm chart), in this case set create to false
 # and adjust the name of the secret as necessary
 # If you dont want to use a secret (because you are using something like an agent injector to inject the cloud config file)
@@ -122,7 +186,8 @@ serviceMonitor: {}
 secret:
   enabled: true
   create: true
-  name: cloud-config
+  # Defaults to <cluster.name>-cloud-config.
+  name: ""
 
 # Log verbosity level.
 # See https://github.com/kubernetes/community/blob/master/contributors/devel/sig-instrumentation/logging.md
@@ -130,13 +195,28 @@ secret:
 logVerbosityLevel: 2
 
 # Specify settings with the same key as the CCM config: https://github.com/kubernetes/cloud-provider-openstack/blob/master/docs/openstack-cloud-controller-manager/using-openstack-cloud-controller-manager.md#config-openstack-cloud-controller-manager
+# Keys with an empty value are left out of cloud.conf.
 cloudConfig:
+  # Keystone URL and credentials of the OpenStack project of the workload
+  # cluster. auth-url is required, and so are the credentials: a password with
+  # username, or an application credential with its secret.
   global:
-  networking:
-  loadBalancer:
-  blockStorage:
-  metadata:
-  route:
+    auth-url: ""
+    region: ""
+    username: ""
+    password: ""
+    user-domain-name: ""
+    tenant-name: ""
+    tenant-domain-name: ""
+    application-credential-id: ""
+    application-credential-secret: ""
+  networking: {}
+  # [LoadBalancer] keys that the loadBalancer values above do not cover, for
+  # example lb-method, create-monitor or monitor-delay.
+  loadBalancer: {}
+  blockStorage: {}
+  metadata: {}
+  route: {}
 
 # Allow for specifying internal IP addresses for multiple hostnames
 # hostAliases:
@@ -146,31 +226,12 @@ cloudConfig:
 
 ## Pod priority settings
 ## ref: https://kubernetes.io/docs/concepts/configuration/pod-priority-preemption/
-priorityClassName: "system-node-critical"
+priorityClassName: ""
 
-# The following three volumes are required to use all OCCM controllers,
-# but might not be needed if you just use a specific controller
 # Additional volumes that should be available to the pods:
-extraVolumes:
-  - name: flexvolume-dir
-    hostPath:
-      path: /usr/libexec/kubernetes/kubelet-plugins/volume/exec
-  - name: k8s-certs
-    hostPath:
-      path: /etc/kubernetes/pki
+extraVolumes: []
 # Where the additional volumes should be mounted into the pods:
-extraVolumeMounts:
-  - name: flexvolume-dir
-    mountPath: /usr/libexec/kubernetes/kubelet-plugins/volume/exec
-    readOnly: true
-  - name: k8s-certs
-    mountPath: /etc/kubernetes/pki
-    readOnly: true
+extraVolumeMounts: []
 
-# cluster name that used for created cluster
-cluster:
-  name: kubernetes
-
-clusterRoleName: system:cloud-controller-manager
-
-serviceAccountName: cloud-controller-manager
+# Defaults to the name of the release.
+serviceAccountName: ""

@@ -17,11 +17,9 @@ limitations under the License.
 package openstack
 
 const (
-	eventLBForceInternal               = "LoadBalancerForcedInternal"
-	eventLBExternalNetworkSearchFailed = "LoadBalancerExternalNetworkSearchFailed"
-	eventLBSourceRangesIgnored         = "LoadBalancerSourceRangesIgnored"
-	eventLBAZIgnored                   = "LoadBalancerAvailabilityZonesIgnored"
-	eventLBFloatingIPSkipped           = "LoadBalancerFloatingIPSkipped"
-	eventLBRename                      = "LoadBalancerRename"
-	eventLBLbMethodUnknown             = "LoadBalancerLbMethodUnknown"
+	eventLBForceInternal             = "LoadBalancerForcedInternal"
+	eventLBInternalAnnotationIgnored = "LoadBalancerInternalAnnotationIgnored"
+	eventLBSourceRangesIgnored       = "LoadBalancerSourceRangesIgnored"
+	eventLBAnnotationIgnored         = "LoadBalancerAnnotationIgnored"
+	eventLBNetworkChangeIgnored      = "LoadBalancerNetworkChangeIgnored"
 )

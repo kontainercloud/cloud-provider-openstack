@@ -1,5 +1,7 @@
 
 *.json
+# Helm validates the values of a chart against this file
+!charts/*/values.schema.json
 *.sublime-project
 *.sublime-workspace
 *.swp

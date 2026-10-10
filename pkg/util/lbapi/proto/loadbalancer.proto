@@ -1,0 +1,1024 @@
+syntax = "proto3";
+
+package loadbalancer.v1;
+
+import "buf/validate/validate.proto";
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/kontainercloud/loadbalancer-api/gen/loadbalancer/v1;loadbalancerv1";
+
+// LoadBalancerService manages load balancer lifecycle.
+service LoadBalancerService {
+  // CreateLoadBalancer accepts a new load balancer request and persists it
+  // with state PENDING. The provisioning IP is not returned at this stage.
+  rpc CreateLoadBalancer(CreateLoadBalancerRequest) returns (CreateLoadBalancerResponse);
+
+  // GetLoadBalancer returns the full detail of a single load balancer.
+  rpc GetLoadBalancer(GetLoadBalancerRequest) returns (GetLoadBalancerResponse);
+
+  // ListLoadBalancers returns a summary list. Optionally filtered by tenant.
+  rpc ListLoadBalancers(ListLoadBalancersRequest) returns (ListLoadBalancersResponse);
+
+  // DeleteLoadBalancer marks the resource as DELETING and returns immediately.
+  rpc DeleteLoadBalancer(DeleteLoadBalancerRequest) returns (DeleteLoadBalancerResponse);
+
+  // BatchDeleteLoadBalancers marks multiple resources as DELETING and returns per-item results.
+  rpc BatchDeleteLoadBalancers(BatchDeleteLoadBalancersRequest) returns (BatchDeleteLoadBalancersResponse);
+
+  // AllocateFloatingIp assigns (or re-assigns) a floating IP to a load balancer.
+  // Sets fip_state to PROVISIONING. The LB must be in READY state.
+  rpc AllocateFloatingIp(AllocateFloatingIpRequest) returns (AllocateFloatingIpResponse);
+
+  // ReleaseFloatingIp initiates removal of the floating IP from a load balancer.
+  // Sets fip_state to REMOVING.
+  rpc ReleaseFloatingIp(ReleaseFloatingIpRequest) returns (ReleaseFloatingIpResponse);
+
+  // UpdateLoadBalancer patches the configuration of an existing load balancer.
+  // Only fields present in the request are updated. Unset fields are left
+  // unchanged. If any spec field changes, the LB state is reset to PENDING so
+  // that the controller re-provisions the resource.
+  rpc UpdateLoadBalancer(UpdateLoadBalancerRequest) returns (UpdateLoadBalancerResponse);
+
+  // --- Listener ---
+  // These address a single listener without resending the whole load balancer.
+  // Every mutation moves the parent load balancer to UPDATING so the controller
+  // re-reconciles it.
+
+  // CreateListener adds a listener to an existing load balancer.
+  rpc CreateListener(CreateListenerRequest) returns (CreateListenerResponse);
+
+  // GetListener returns a single listener including all of its rules.
+  rpc GetListener(GetListenerRequest) returns (GetListenerResponse);
+
+  // ListListeners returns every listener of a load balancer.
+  rpc ListListeners(ListListenersRequest) returns (ListListenersResponse);
+
+  // ModifyListener updates a listener in place. Rules are left untouched
+  // unless the request carries them.
+  rpc ModifyListener(ModifyListenerRequest) returns (ModifyListenerResponse);
+
+  // DeleteListeners removes one or more listeners and all of their rules.
+  rpc DeleteListeners(DeleteListenersRequest) returns (DeleteListenersResponse);
+
+  // --- Listener Rule ---
+
+  // CreateRule adds a rule to a listener. TCP and UDP listeners accept exactly
+  // one rule, so this fails on an L4 listener that already has one.
+  rpc CreateRule(CreateRuleRequest) returns (CreateRuleResponse);
+
+  // GetRule returns a single rule.
+  rpc GetRule(GetRuleRequest) returns (GetRuleResponse);
+
+  // ListRules returns every rule of a listener, ordered by priority.
+  rpc ListRules(ListRulesRequest) returns (ListRulesResponse);
+
+  // ModifyRule updates a rule in place. Changing backend weights this way does
+  // not recreate the underlying Backend resources, unlike delete-then-create.
+  rpc ModifyRule(ModifyRuleRequest) returns (ModifyRuleResponse);
+
+  // DeleteRules removes one or more rules from a listener.
+  rpc DeleteRules(DeleteRulesRequest) returns (DeleteRulesResponse);
+
+  // SetRulePriorities reorders the rules of a listener.
+  //
+  // Priority is the position of a rule in the listener's rule list. It is NOT
+  // an absolute evaluation order: the underlying data plane matches by
+  // specificity first (exact path, then longest prefix, then method, then most
+  // header matches, then most query-param matches) and only falls back to this
+  // order to break a tie between equally specific rules.
+  rpc SetRulePriorities(SetRulePrioritiesRequest) returns (SetRulePrioritiesResponse);
+
+  // --- Health ---
+
+  // Ping is an unauthenticated readiness probe. It reports whether the service
+  // can actually serve traffic, which includes reaching its database: every
+  // other RPC here reads or writes it, so a process that is up but cannot
+  // reach the database is not ready.
+  //
+  // This RPC is deliberately exempt from the bearer-token interceptor so that
+  // orchestrators and upstream load balancers can probe readiness without
+  // holding a credential. Because it is unauthenticated it must never report
+  // anything a caller could not already learn by opening a connection — in
+  // particular, dependency errors are reported as a fixed string, never the
+  // driver's message, which can carry the DSN, host names, or credentials.
+  rpc Ping(PingRequest) returns (PingResponse);
+
+  // AuthenticatedPing is the same readiness probe behind the bearer-token
+  // interceptor, so reaching its handler at all proves the caller's token was
+  // accepted. Clients use it to verify their credential is configured
+  // correctly. Check auth_enforced on the response before drawing that
+  // conclusion — see the field comment.
+  rpc AuthenticatedPing(AuthenticatedPingRequest) returns (AuthenticatedPingResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Health
+// ---------------------------------------------------------------------------
+
+message PingRequest {}
+
+message PingResponse {
+  // ready is false when a dependency required to serve requests is
+  // unreachable. Treat false as "do not route traffic to this instance".
+  //
+  // A not-ready answer is still returned as a successful RPC carrying
+  // ready=false, not as an error code, so the caller gets the structured
+  // detail below. The plain HTTP /healthz endpoint remains available for
+  // probes that can only interpret a status code.
+  bool ready = 1;
+
+  // message is a short, non-sensitive reason. Empty when ready is true.
+  string message = 2;
+}
+
+message AuthenticatedPingRequest {}
+
+message AuthenticatedPingResponse {
+  // ready has the same meaning as PingResponse.ready.
+  bool ready = 1;
+
+  // message has the same meaning as PingResponse.message.
+  string message = 2;
+
+  // auth_enforced reports whether the server actually validated a bearer token
+  // for this call. The auth interceptor is a deliberate no-op when the server
+  // has no API key configured, so a successful response does NOT by itself
+  // prove the caller's credential is valid.
+  //
+  // This matters when registering a region's load balancer service: against a
+  // server running without an API key, AuthenticatedPing succeeds for ANY
+  // token, including a wrong one. A caller validating its configuration must
+  // require auth_enforced=true before reporting the credential as good.
+  bool auth_enforced = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum State {
+  STATE_UNSPECIFIED = 0;
+  STATE_PENDING = 1;
+  STATE_PROVISIONING = 2;
+  STATE_READY = 3;
+  STATE_FAILED = 4;
+  STATE_DELETING = 5;
+  STATE_DELETED = 6;
+  STATE_UPDATING = 7;
+}
+
+// Algorithm defines the load balancing strategy for distributing traffic
+// across backend endpoints.
+enum Algorithm {
+  ALGORITHM_UNSPECIFIED = 0;
+  ALGORITHM_ROUND_ROBIN = 1;
+  ALGORITHM_LEAST_REQUEST = 2;
+  ALGORITHM_RANDOM = 3;
+  ALGORITHM_CONSISTENT_HASH = 4;
+}
+
+// Protocol defines the transport protocol for the load balancer listener.
+enum Protocol {
+  PROTOCOL_UNSPECIFIED = 0;
+  PROTOCOL_TCP = 1;
+  PROTOCOL_UDP = 2;
+  PROTOCOL_HTTP = 3;
+}
+
+// FipState describes the lifecycle state of a floating IP assignment.
+// HttpPathType defines how the path should be matched against HTTP request paths.
+enum HttpPathType {
+  HTTP_PATH_TYPE_UNSPECIFIED = 0;
+  // HTTP_PATH_TYPE_EXACT matches the path exactly.
+  HTTP_PATH_TYPE_EXACT = 1;
+  // HTTP_PATH_TYPE_PREFIX matches paths with the given prefix.
+  HTTP_PATH_TYPE_PREFIX = 2;
+  // HTTP_PATH_TYPE_REGEX matches paths using a regular expression.
+  HTTP_PATH_TYPE_REGEX = 3;
+}
+
+// HttpMethod defines the HTTP request method.
+enum HttpMethod {
+  HTTP_METHOD_UNSPECIFIED = 0;
+  HTTP_METHOD_GET = 1;
+  HTTP_METHOD_POST = 2;
+  HTTP_METHOD_PUT = 3;
+  HTTP_METHOD_DELETE = 4;
+  HTTP_METHOD_PATCH = 5;
+  HTTP_METHOD_HEAD = 6;
+  HTTP_METHOD_OPTIONS = 7;
+}
+
+// HeaderMatchType defines how a header value is compared.
+enum HeaderMatchType {
+  HEADER_MATCH_TYPE_UNSPECIFIED = 0;
+  // HEADER_MATCH_TYPE_EXACT requires the header value to match exactly.
+  HEADER_MATCH_TYPE_EXACT = 1;
+  // HEADER_MATCH_TYPE_REGEX treats the value as a regular expression.
+  HEADER_MATCH_TYPE_REGEX = 2;
+}
+
+// QueryParamMatchType defines how a query parameter value is compared.
+enum QueryParamMatchType {
+  QUERY_PARAM_MATCH_TYPE_UNSPECIFIED = 0;
+  // QUERY_PARAM_MATCH_TYPE_EXACT requires the value to match exactly.
+  QUERY_PARAM_MATCH_TYPE_EXACT = 1;
+  // QUERY_PARAM_MATCH_TYPE_REGEX treats the value as a regular expression.
+  QUERY_PARAM_MATCH_TYPE_REGEX = 2;
+}
+
+enum FipState {
+  FIP_STATE_UNSPECIFIED = 0;
+  // FIP_STATE_NONE means no floating IP is assigned or requested.
+  FIP_STATE_NONE = 1;
+  // FIP_STATE_PROVISIONING means an allocation request is in progress.
+  FIP_STATE_PROVISIONING = 2;
+  // FIP_STATE_ACTIVE means the floating IP is assigned and active.
+  FIP_STATE_ACTIVE = 3;
+  // FIP_STATE_REMOVING means a release request is in progress.
+  FIP_STATE_REMOVING = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Shared sub-messages
+// ---------------------------------------------------------------------------
+
+// BackendRef is a single upstream endpoint the load balancer forwards to.
+// It is an endpoint inside a RuleBackend, not a target of a listener.
+message BackendRef {
+  string ip = 1 [(buf.validate.field).string.ip = true];
+  int32 port = 2 [(buf.validate.field).int32 = {
+    gte: 1
+    lte: 65535
+  }];
+}
+
+// HttpPathMatch matches the request path.
+message HttpPathMatch {
+  HttpPathType type = 1 [(buf.validate.field).enum.defined_only = true];
+  string value = 2 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 1024
+  }];
+
+  option (buf.validate.message).cel = {
+    id: "path-value-leading-slash"
+    message: "path must start with '/' unless the type is REGEX"
+    expression: "this.type == 3 || this.value.startsWith('/')"
+  };
+}
+
+// HttpHeaderMatch matches a single request header. Header names are compared
+// case-insensitively. Match on the Host header via Listener.hostnames instead.
+message HttpHeaderMatch {
+  string name = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 256
+  }];
+  string value = 2 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 4096
+  }];
+  HeaderMatchType type = 3 [(buf.validate.field).enum.defined_only = true];
+}
+
+// HttpQueryParamMatch matches a single query-string parameter.
+message HttpQueryParamMatch {
+  string name = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 256
+  }];
+  string value = 2 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 1024
+  }];
+  QueryParamMatchType type = 3 [(buf.validate.field).enum.defined_only = true];
+}
+
+// HttpRouteMatch is one condition set on an HTTP rule. Everything inside a
+// single match is ANDed together; a rule matches if ANY of its matches is
+// satisfied. Only meaningful when Protocol is HTTP.
+message HttpRouteMatch {
+  optional HttpPathMatch path = 1;
+  repeated HttpHeaderMatch headers = 2 [(buf.validate.field).repeated.max_items = 16];
+  repeated HttpQueryParamMatch query_params = 3 [(buf.validate.field).repeated.max_items = 16];
+  HttpMethod method = 4 [(buf.validate.field).enum.defined_only = true];
+
+  option (buf.validate.message).cel = {
+    id: "match-not-empty"
+    message: "a match must set at least one of path, headers, query_params or method"
+    expression: "has(this.path) || size(this.headers) > 0 || size(this.query_params) > 0 || this.method != 0"
+  };
+}
+
+// RuleBackend is one weighted forwarding target of a rule. It is realised as a
+// single upstream cluster containing every endpoint listed here, and receives
+// weight / (sum of the rule's weights) of the traffic matching the rule.
+message RuleBackend {
+  // id is a server-assigned UUID. It is stable for the life of the backend and
+  // is what ties this backend to its generated infrastructure, so reordering
+  // or re-prioritising never recreates it.
+  string id = 1;
+  // name is an optional human-readable label.
+  string name = 2 [(buf.validate.field).string.max_len = 255];
+  // weight is this backend's share of the rule's traffic, relative to the other
+  // backends of the same rule. Defaults to 1 when unset.
+  //
+  // A weight of 0 removes the backend from the rotation entirely — it does not
+  // mean "an equal share".
+  int32 weight = 3 [(buf.validate.field).int32 = {
+    gte: 0
+    lte: 1000000
+  }];
+  // endpoints are the upstream addresses making up this backend.
+  repeated BackendRef endpoints = 4 [(buf.validate.field).repeated = {
+    min_items: 1
+    max_items: 256
+  }];
+}
+
+// ListenerRule routes a subset of a listener's traffic to a set of weighted
+// backends. HTTP listeners may carry up to 16 rules selected by their matches;
+// TCP and UDP listeners carry exactly one rule with no matches, because there
+// is nothing in an L4 stream to match on.
+message ListenerRule {
+  // id is a server-assigned UUID, stable across updates and re-prioritisation.
+  string id = 1;
+  // listener_id is the owning listener. Set on responses; ignored on create.
+  string listener_id = 2;
+  // priority is the rule's position within the listener, lowest first.
+  //
+  // This breaks ties between equally specific rules. It does not override match
+  // specificity — see SetRulePriorities.
+  int32 priority = 3 [(buf.validate.field).int32.gte = 0];
+  // matches are the conditions selecting this rule. HTTP only. An empty list
+  // matches every request, which makes the rule a catch-all.
+  repeated HttpRouteMatch matches = 4 [(buf.validate.field).repeated.max_items = 64];
+  // backends are the weighted forwarding targets.
+  repeated RuleBackend backends = 5 [(buf.validate.field).repeated = {
+    min_items: 1
+    max_items: 16
+  }];
+  // algorithm defines how traffic is spread across the endpoints of a backend.
+  Algorithm algorithm = 6 [(buf.validate.field).enum.defined_only = true];
+  // health_monitor is optional. When set, active health checking is enabled
+  // for every backend of this rule.
+  optional HealthMonitor health_monitor = 7;
+
+  option (buf.validate.message).cel = {
+    id: "rule-weight-sum"
+    message: "at least one backend must have a weight greater than zero"
+    expression: "this.backends.exists(b, b.weight > 0)"
+  };
+  // Endpoint uniqueness is checked in Go (validateRules); CEL has no set
+  // primitive that expresses it without quadratic gymnastics.
+}
+
+// HealthMonitor defines active health check settings for backend endpoints.
+message HealthMonitor {
+  // interval is the time in seconds between successive health checks.
+  int32 interval = 1 [(buf.validate.field).int32 = {
+    gte: 1
+    lte: 3600
+  }];
+  // timeout is the time in seconds to wait for a health check response.
+  int32 timeout = 2 [(buf.validate.field).int32 = {
+    gte: 1
+    lte: 300
+  }];
+  // unhealthy_threshold is the number of consecutive failures before marking
+  // a backend as unhealthy.
+  int32 unhealthy_threshold = 3 [(buf.validate.field).int32.gt = 0];
+  // healthy_threshold is the number of consecutive successes before marking
+  // a backend as healthy again.
+  int32 healthy_threshold = 4 [(buf.validate.field).int32.gt = 0];
+  // http_health_check_path is the HTTP path used for health checks (only relevant when protocol=HTTP).
+  // Default: "/"
+  string http_health_check_path = 5;
+  // http_health_check_method is the HTTP method used for health checks (only relevant when protocol=HTTP).
+  // Default: GET
+  HttpMethod http_health_check_method = 6 [(buf.validate.field).enum.defined_only = true];
+  // expected_status_codes lists the HTTP status codes that indicate a healthy backend.
+  // Example: [200, 201, 202]. Default: [200].
+  repeated int32 expected_status_codes = 7;
+
+  option (buf.validate.message).cel = {
+    id: "timeout-less-than-interval"
+    message: "timeout must be less than interval"
+    expression: "this.timeout < this.interval"
+  };
+}
+
+// Listener defines a single listener on a load balancer: a port, a protocol,
+// TLS settings, and the rules that route its traffic.
+//
+// Algorithm, backends and health monitoring used to live here and now live on
+// the individual rule, so different paths of the same listener can carry
+// different backends and health checks.
+message Listener {
+  reserved 3, 4, 5, 6;
+  reserved "algorithm", "backend_refs", "http_route", "health_monitor";
+
+  int32 port = 1 [(buf.validate.field).int32 = {
+    gte: 1
+    lte: 65535
+  }];
+  Protocol protocol = 2 [(buf.validate.field).enum.defined_only = true];
+  // id is a server-assigned UUID used to identify this listener. It is stable
+  // for the life of the listener.
+  string id = 7;
+  // tls_enabled controls whether TLS is enabled for this listener. Default: false.
+  bool tls_enabled = 8;
+  // tls_cert is the TLS certificate in PEM format. Required when tls_enabled is true.
+  string tls_cert = 9;
+  // tls_key is the TLS private key in PEM format. Required when tls_enabled is true.
+  string tls_key = 10;
+  // rules route this listener's traffic. HTTP listeners may carry up to 16;
+  // TCP and UDP listeners carry exactly one.
+  repeated ListenerRule rules = 11 [(buf.validate.field).repeated = {
+    min_items: 1
+    max_items: 16
+  }];
+  // hostnames restrict this listener to the given HTTP Host values. Empty
+  // means any host. A leading "*." wildcard label is allowed.
+  //
+  // Hostnames are per-listener rather than per-rule because the underlying
+  // route object scopes them to the whole route.
+  repeated string hostnames = 12 [(buf.validate.field).repeated = {
+    unique: true
+    max_items: 16
+    items: {
+      string: {pattern: "^(\\*\\.)?([a-zA-Z0-9-]+\\.)+[a-zA-Z]{2,}$"}
+    }
+  }];
+  // load_balancer_id is the owning load balancer. Set on responses.
+  string load_balancer_id = 13;
+
+  option (buf.validate.message).cel = {
+    id: "tls-cert-required"
+    message: "TLS certificate and key are required when TLS is enabled"
+    expression: "!this.tls_enabled || (this.tls_cert != '' && this.tls_key != '')"
+  };
+  option (buf.validate.message).cel = {
+    id: "l4-single-rule"
+    message: "TCP and UDP listeners support exactly one rule"
+    expression: "this.protocol == 3 || size(this.rules) == 1"
+  };
+  option (buf.validate.message).cel = {
+    id: "l4-no-matches"
+    message: "match conditions are only allowed on HTTP listeners"
+    expression: "this.protocol == 3 || this.rules.all(r, size(r.matches) == 0)"
+  };
+  option (buf.validate.message).cel = {
+    id: "hostnames-http-only"
+    message: "hostnames are only allowed on HTTP listeners"
+    expression: "this.protocol == 3 || size(this.hostnames) == 0"
+  };
+  option (buf.validate.message).cel = {
+    id: "http-health-monitor-required"
+    message: "health check path, method, and expected status codes are required when protocol is HTTP and a health monitor is enabled"
+    expression: "this.protocol != 3 || this.rules.all(r, !has(r.health_monitor) || (r.health_monitor.http_health_check_path.startsWith('/') && r.health_monitor.http_health_check_method != 0 && size(r.health_monitor.expected_status_codes) > 0 && r.health_monitor.expected_status_codes.all(c, c >= 100 && c <= 599)))"
+  };
+}
+
+// LoadBalancerSpec captures the user-supplied configuration.
+message LoadBalancerSpec {
+  string tenant_id = 1 [(buf.validate.field).string.min_len = 1];
+  string network_id = 2 [(buf.validate.field).string.min_len = 1];
+  string subnet_id = 3 [(buf.validate.field).string.min_len = 1];
+  // listeners defines the set of ports and protocols this LB listens on.
+  repeated Listener listeners = 4 [(buf.validate.field).repeated.min_items = 1];
+  // client_conn_limit is the maximum number of simultaneous client connections.
+  // 0 means unlimited (use the platform default, e.g. 1000).
+  int32 client_conn_limit = 6 [(buf.validate.field).int32.gte = 0];
+  reserved 12;
+  reserved "security_group_id";
+  // security_group_disabled controls whether security groups are applied.
+  // When true, port security is turned off entirely and security_group_ids is
+  // ignored. When false with an empty security_group_ids, all traffic is blocked.
+  bool security_group_disabled = 11;
+  // security_group_ids are the UUIDs of the security groups to apply to every
+  // port of this load balancer. Ignored when security_group_disabled is true.
+  repeated string security_group_ids = 15 [(buf.validate.field).repeated = {
+    unique: true
+    max_items: 10
+    items: {
+      string: {pattern: "^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$"}
+    }
+  }];
+  // qos_policy_disabled controls whether a QoS policy is applied.
+  // When true, no QoS policy is applied. When false with empty qos_policy_id, no QoS enforcement.
+  bool qos_policy_disabled = 13;
+  // qos_policy_id is the UUID of the OpenStack QoS policy to apply.
+  // When qos_policy_disabled is false and this is empty, no QoS enforcement.
+  string qos_policy_id = 14;
+  // vpc_cidr is the address range of the VPC this load balancer lives in,
+  // e.g. "10.0.0.0/16". Optional.
+  //
+  // The node routes backend traffic out its VLAN interface only for
+  // destinations inside this range. Leave it empty when every backend shares
+  // the load balancer's subnet; set it when backends live in other subnets of
+  // the VPC, including subnets added after the LB was created.
+  string vpc_cidr = 16;
+
+  option (buf.validate.message).cel = {
+    id: "spec-id-uuid-format"
+    message: "tenant_id, network_id, and subnet_id must be valid UUIDs (hex with optional dashes)"
+    expression: "this.tenant_id.matches('^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$') && this.network_id.matches('^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$') && this.subnet_id.matches('^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$')"
+  };
+  option (buf.validate.message).cel = {
+    id: "qos-policy-validation"
+    message: "qos_policy_id must be a valid UUID when QoS policy is enabled"
+    expression: "this.qos_policy_disabled || this.qos_policy_id.matches('^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$')"
+  };
+  // vpc_cidr is optional, so the guard must accept the empty string. A field
+  // level ip_prefix or min_len rule would make it required instead.
+  option (buf.validate.message).cel = {
+    id: "vpc-cidr-format"
+    message: "vpc_cidr must be an IPv4 CIDR such as 10.0.0.0/16, or empty"
+    expression: "this.vpc_cidr == '' || this.vpc_cidr.matches('^([0-9]{1,3}[.]){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$')"
+  };
+}
+
+// LoadBalancerSummary is the lightweight representation used in list responses.
+message LoadBalancerSummary {
+  string id = 1;
+  string name = 2;
+  // ip is empty until the external controller sets it.
+  string ip = 3;
+  State state = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp updated_at = 8;
+  // Floating IP fields.
+  bool fip_enabled = 11;
+  string fip = 12;
+  FipState fip_state = 13;
+  // fip_network_id is the external network ID used when allocating the FIP.
+  string fip_network_id = 14;
+  // Security & limits.
+  int32 client_conn_limit = 17;
+  // listener_count is the number of listeners configured on this LB.
+  int32 listener_count = 19;
+  // Security group fields.
+  reserved 21;
+  reserved "security_group_id";
+  bool security_group_disabled = 20;
+  repeated string security_group_ids = 24;
+  // QoS policy fields.
+  bool qos_policy_disabled = 22;
+  string qos_policy_id = 23;
+}
+
+// LoadBalancer is the full representation including spec and error details.
+message LoadBalancer {
+  string id = 1;
+  string name = 2;
+  // ip is the provisioned VIP address (only set when state is READY).
+  string ip = 3;
+  LoadBalancerSpec spec = 4;
+  State state = 5;
+  // error contains a human-readable message when state is FAILED.
+  string error = 6;
+  google.protobuf.Timestamp created_at = 7;
+  google.protobuf.Timestamp updated_at = 8;
+  // Floating IP fields.
+  bool fip_enabled = 9;
+  string fip = 10;
+  FipState fip_state = 11;
+  // fip_network_id is the external network ID used when allocating the FIP.
+  string fip_network_id = 12;
+  // Security group fields.
+  reserved 14;
+  reserved "security_group_id";
+  bool security_group_disabled = 13;
+  repeated string security_group_ids = 17;
+  // QoS policy fields.
+  bool qos_policy_disabled = 15;
+  string qos_policy_id = 16;
+}
+
+// ---------------------------------------------------------------------------
+// Request / Response messages
+// ---------------------------------------------------------------------------
+
+message CreateLoadBalancerRequest {
+  // name is a human-friendly label for the load balancer.
+  string name = 1 [(buf.validate.field).string.max_len = 255];
+  LoadBalancerSpec spec = 2 [(buf.validate.field).required = true];
+  // fip is an optional floating IP to pre-assign during creation.
+  // If non-empty, fip_state will be set to PROVISIONING after creation.
+  optional string fip = 3;
+  // fip_network_id is the external network ID for FIP allocation.
+  // Required when fip field is set (i.e., FIP is enabled).
+  optional string fip_network_id = 4 [(buf.validate.field).string.uuid = true];
+  // idempotency_key prevents duplicate creation on retry.
+  string idempotency_key = 5 [(buf.validate.field).string.uuid = true];
+
+  option (buf.validate.message).cel = {
+    id: "fip-ip-valid"
+    message: "fip must be a valid IPv4 address when provided and non-empty"
+    expression: "!has(this.fip) || this.fip == '' || this.fip.matches('^(?:[0-9]{1,3}\\\\.){3}[0-9]{1,3}$')"
+  };
+  option (buf.validate.message).cel = {
+    id: "fip-network-required"
+    message: "fip_network_id is required when fip is provided"
+    expression: "!has(this.fip) || has(this.fip_network_id)"
+  };
+}
+
+message CreateLoadBalancerResponse {
+  // id is the database-assigned identifier.
+  string id = 1;
+  // state will always be PENDING on creation.
+  State state = 2;
+}
+
+message GetLoadBalancerRequest {
+  string id = 1 [(buf.validate.field).string.uuid = true];
+}
+
+message GetLoadBalancerResponse {
+  LoadBalancer load_balancer = 1;
+}
+
+message ListLoadBalancersRequest {
+  // tenant_id optionally filters the results. Empty means return all.
+  string tenant_id = 1;
+  // page_size is the maximum number of items per page. Defaults to 50, max 200.
+  int32 page_size = 2 [(buf.validate.field).int32 = {
+    gte: 1
+    lte: 200
+  }];
+  // page_token is an opaque cursor for pagination. Empty means first page.
+  string page_token = 3;
+}
+
+message ListLoadBalancersResponse {
+  repeated LoadBalancerSummary load_balancers = 1;
+  // next_page_token is empty when this is the last page.
+  string next_page_token = 2;
+}
+
+message DeleteLoadBalancerRequest {
+  string id = 1 [(buf.validate.field).string.uuid = true];
+
+  // preserve_floating_ip keeps the floating IP allocated to the tenant instead
+  // of releasing it: the address is disassociated from the port and left in the
+  // project so it can be reused. It defaults to false, which releases the
+  // address back to the pool as before.
+  //
+  // Ignored when the load balancer has no floating IP. The choice is recorded
+  // on the load balancer when the delete is accepted, so a second delete of an
+  // already-deleting load balancer does not change it.
+  bool preserve_floating_ip = 2;
+}
+
+message DeleteLoadBalancerResponse {
+  string id = 1;
+  // state will always be DELETING immediately after this call.
+  State state = 2;
+}
+
+message BatchDeleteLoadBalancersResult {
+  string id = 1;
+  bool succeeded = 2;
+  string message = 3;
+}
+
+message BatchDeleteLoadBalancersRequest {
+  repeated string ids = 1 [(buf.validate.field).repeated = {
+    min_items: 1
+    max_items: 100
+    items: {
+      string: {uuid: true}
+    }
+  }];
+}
+
+message BatchDeleteLoadBalancersResponse {
+  repeated BatchDeleteLoadBalancersResult results = 1;
+}
+
+message AllocateFloatingIpRequest {
+  string id = 1 [(buf.validate.field).string.uuid = true];
+  // fip is the floating IP address to assign. Can be left empty to let the
+  // infrastructure auto-assign an address.
+  string fip = 2;
+  // fip_network_id is the external network ID for FIP allocation. Required.
+  string fip_network_id = 3 [(buf.validate.field).string.uuid = true];
+}
+
+message AllocateFloatingIpResponse {
+  string id = 1;
+  FipState fip_state = 2;
+  string fip = 3;
+}
+
+message ReleaseFloatingIpRequest {
+  string id = 1 [(buf.validate.field).string.uuid = true];
+}
+
+message ReleaseFloatingIpResponse {
+  string id = 1;
+  FipState fip_state = 2;
+}
+
+message UpdateLoadBalancerRequest {
+  string id = 1 [(buf.validate.field).string.uuid = true];
+
+  // --- Listeners (full replacement) ---
+  // Send the complete desired list of listeners. Listeners and rules carrying a
+  // known id keep it and are updated in place; those without one are created;
+  // those missing from the list are removed. Preserving ids matters because the
+  // generated infrastructure is keyed by them — a listener or rule that keeps
+  // its id keeps its backends rather than having them recreated.
+  //
+  // Use the Listener and Rule RPCs to change one listener or rule without
+  // resending the whole set.
+  repeated Listener listeners = 2;
+
+  // --- Traffic shaping ---
+  optional int32 client_conn_limit = 9;
+
+  // --- Security group ---
+  // security_group_disabled carries the presence signal for the whole security
+  // group block: when it is set, it and security_group_ids are applied as-is,
+  // and security_group_ids fully replaces the existing list. Omit it to leave
+  // the security groups untouched — a repeated field cannot itself distinguish
+  // "omitted" from "sent empty", so sending ids without the flag is rejected.
+  reserved 14;
+  reserved "security_group_id";
+  optional bool security_group_disabled = 13;
+  repeated string security_group_ids = 17 [(buf.validate.field).repeated = {
+    unique: true
+    max_items: 10
+    items: {
+      string: {pattern: "^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$"}
+    }
+  }];
+
+  // --- QoS policy ---
+  // When present, qos_policy_disabled + qos_policy_id are applied as-is.
+  optional bool qos_policy_disabled = 15;
+  optional string qos_policy_id = 16;
+
+  // --- VPC ---
+  // vpc_cidr is settable after creation because the need for it usually
+  // surfaces later: the load balancer works, then a backend is added in
+  // another subnet and stops receiving traffic. Send an empty string to clear
+  // it; omit the field to leave it untouched.
+  optional string vpc_cidr = 18;
+
+  option (buf.validate.message).cel = {
+    id: "update-client-conn-limit"
+    message: "client_conn_limit must be non-negative"
+    expression: "!has(this.client_conn_limit) || this.client_conn_limit >= 0"
+  };
+  option (buf.validate.message).cel = {
+    id: "update-security-group-presence"
+    message: "security_group_disabled is required when security_group_ids is set"
+    expression: "has(this.security_group_disabled) || size(this.security_group_ids) == 0"
+  };
+  option (buf.validate.message).cel = {
+    id: "update-qos-policy"
+    message: "qos_policy_id must be a valid UUID when QoS policy is enabled"
+    expression: "!has(this.qos_policy_disabled) || this.qos_policy_disabled || (has(this.qos_policy_id) && this.qos_policy_id.matches('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'))"
+  };
+  option (buf.validate.message).cel = {
+    id: "update-vpc-cidr-format"
+    message: "vpc_cidr must be an IPv4 CIDR such as 10.0.0.0/16, or empty to clear it"
+    expression: "!has(this.vpc_cidr) || this.vpc_cidr == '' || this.vpc_cidr.matches('^([0-9]{1,3}[.]){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$')"
+  };
+}
+
+message UpdateLoadBalancerResponse {
+  string id = 1;
+  State state = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Listener request / response messages
+// ---------------------------------------------------------------------------
+
+message CreateListenerRequest {
+  // load_balancer_id is the load balancer to add the listener to.
+  string load_balancer_id = 1 [(buf.validate.field).string.uuid = true];
+  // listener carries the desired configuration. Its id, load_balancer_id and
+  // the ids of its rules and backends are assigned by the server and ignored
+  // if set.
+  Listener listener = 2 [(buf.validate.field).required = true];
+}
+
+message CreateListenerResponse {
+  // listener is the created listener with every server-assigned id populated.
+  Listener listener = 1;
+  // state is the load balancer's state after the change (UPDATING).
+  State state = 2;
+}
+
+message GetListenerRequest {
+  string id = 1 [(buf.validate.field).string.uuid = true];
+}
+
+message GetListenerResponse {
+  Listener listener = 1;
+}
+
+message ListListenersRequest {
+  string load_balancer_id = 1 [(buf.validate.field).string.uuid = true];
+}
+
+message ListListenersResponse {
+  repeated Listener listeners = 1;
+}
+
+message ModifyListenerRequest {
+  string id = 1 [(buf.validate.field).string.uuid = true];
+
+  // Every field below is optional; omitted fields are left unchanged.
+  optional int32 port = 2 [(buf.validate.field).int32 = {
+    gte: 1
+    lte: 65535
+  }];
+  optional bool tls_enabled = 3;
+  optional string tls_cert = 4;
+  optional string tls_key = 5;
+
+  // hostnames fully replaces the listener's hostname list. It is guarded by
+  // replace_hostnames because a repeated field cannot distinguish "omitted"
+  // from "sent empty".
+  bool replace_hostnames = 6;
+  repeated string hostnames = 7 [(buf.validate.field).repeated = {
+    unique: true
+    max_items: 16
+    items: {
+      string: {pattern: "^(\\*\\.)?([a-zA-Z0-9-]+\\.)+[a-zA-Z]{2,}$"}
+    }
+  }];
+
+  // rules fully replaces the listener's rules, guarded by replace_rules for the
+  // same reason. Rules carrying a known id keep it and their backends; rules
+  // without one are created fresh. Use the Rule RPCs to change a single rule.
+  bool replace_rules = 8;
+  repeated ListenerRule rules = 9 [(buf.validate.field).repeated.max_items = 16];
+
+  option (buf.validate.message).cel = {
+    id: "modify-listener-hostnames-presence"
+    message: "replace_hostnames must be set when hostnames is provided"
+    expression: "this.replace_hostnames || size(this.hostnames) == 0"
+  };
+  option (buf.validate.message).cel = {
+    id: "modify-listener-rules-presence"
+    message: "replace_rules must be set when rules is provided"
+    expression: "this.replace_rules || size(this.rules) == 0"
+  };
+  option (buf.validate.message).cel = {
+    id: "modify-listener-rules-not-empty"
+    message: "a listener must keep at least one rule"
+    expression: "!this.replace_rules || size(this.rules) > 0"
+  };
+}
+
+message ModifyListenerResponse {
+  Listener listener = 1;
+  State state = 2;
+}
+
+message DeleteListenersRequest {
+  string load_balancer_id = 1 [(buf.validate.field).string.uuid = true];
+  repeated string ids = 2 [(buf.validate.field).repeated = {
+    min_items: 1
+    max_items: 100
+    items: {
+      string: {uuid: true}
+    }
+  }];
+}
+
+message DeleteListenersResponse {
+  // deleted_ids lists the listeners that were actually removed.
+  repeated string deleted_ids = 1;
+  State state = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Listener rule request / response messages
+// ---------------------------------------------------------------------------
+
+message CreateRuleRequest {
+  string listener_id = 1 [(buf.validate.field).string.uuid = true];
+  // rule carries the desired configuration. Its id, listener_id and backend ids
+  // are assigned by the server and ignored if set. When priority is 0 the rule
+  // is appended to the end of the listener's rule list.
+  ListenerRule rule = 2 [(buf.validate.field).required = true];
+}
+
+message CreateRuleResponse {
+  ListenerRule rule = 1;
+  State state = 2;
+}
+
+message GetRuleRequest {
+  string id = 1 [(buf.validate.field).string.uuid = true];
+}
+
+message GetRuleResponse {
+  ListenerRule rule = 1;
+}
+
+message ListRulesRequest {
+  string listener_id = 1 [(buf.validate.field).string.uuid = true];
+}
+
+message ListRulesResponse {
+  // rules are ordered by priority, lowest first.
+  repeated ListenerRule rules = 1;
+}
+
+message ModifyRuleRequest {
+  string id = 1 [(buf.validate.field).string.uuid = true];
+
+  // matches fully replaces the rule's match conditions, guarded by
+  // replace_matches so an intentionally empty list is distinguishable.
+  bool replace_matches = 2;
+  repeated HttpRouteMatch matches = 3 [(buf.validate.field).repeated.max_items = 64];
+
+  // backends fully replaces the rule's backends, guarded by replace_backends.
+  // Backends carrying a known id keep it, so changing only a weight leaves the
+  // generated infrastructure in place.
+  bool replace_backends = 4;
+  repeated RuleBackend backends = 5 [(buf.validate.field).repeated.max_items = 16];
+
+  optional Algorithm algorithm = 6 [(buf.validate.field).enum.defined_only = true];
+
+  // health_monitor is applied when disable_health_monitor is false. Set
+  // disable_health_monitor to turn active health checking off.
+  optional HealthMonitor health_monitor = 7;
+  bool disable_health_monitor = 8;
+
+  optional int32 priority = 9 [(buf.validate.field).int32.gte = 0];
+
+  option (buf.validate.message).cel = {
+    id: "modify-rule-matches-presence"
+    message: "replace_matches must be set when matches is provided"
+    expression: "this.replace_matches || size(this.matches) == 0"
+  };
+  option (buf.validate.message).cel = {
+    id: "modify-rule-backends-presence"
+    message: "replace_backends must be set when backends is provided"
+    expression: "this.replace_backends || size(this.backends) == 0"
+  };
+  option (buf.validate.message).cel = {
+    id: "modify-rule-backends-not-empty"
+    message: "a rule must keep at least one backend with a weight greater than zero"
+    expression: "!this.replace_backends || this.backends.exists(b, b.weight > 0)"
+  };
+  option (buf.validate.message).cel = {
+    id: "modify-rule-health-monitor-exclusive"
+    message: "health_monitor cannot be set while disable_health_monitor is true"
+    expression: "!this.disable_health_monitor || !has(this.health_monitor)"
+  };
+}
+
+message ModifyRuleResponse {
+  ListenerRule rule = 1;
+  State state = 2;
+}
+
+message DeleteRulesRequest {
+  string listener_id = 1 [(buf.validate.field).string.uuid = true];
+  repeated string ids = 2 [(buf.validate.field).repeated = {
+    min_items: 1
+    max_items: 100
+    items: {
+      string: {uuid: true}
+    }
+  }];
+}
+
+message DeleteRulesResponse {
+  repeated string deleted_ids = 1;
+  State state = 2;
+}
+
+// RulePriority assigns a position to one rule.
+message RulePriority {
+  string rule_id = 1 [(buf.validate.field).string.uuid = true];
+  int32 priority = 2 [(buf.validate.field).int32.gte = 0];
+}
+
+message SetRulePrioritiesRequest {
+  string listener_id = 1 [(buf.validate.field).string.uuid = true];
+  // rule_priorities must cover every rule of the listener, with no duplicate
+  // priorities.
+  repeated RulePriority rule_priorities = 2 [(buf.validate.field).repeated = {
+    min_items: 1
+    max_items: 16
+  }];
+}
+
+message SetRulePrioritiesResponse {
+  // rules are the listener's rules in their new order.
+  repeated ListenerRule rules = 1;
+  State state = 2;
+}
