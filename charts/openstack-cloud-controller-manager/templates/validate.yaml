@@ -1,0 +1,47 @@
+{{- /*
+Fails the install for values that cannot work, with a message that says what to
+set. Renders nothing. Types, allowed values and ID formats are checked by
+values.schema.json.
+
+The cloud config is only checked when the chart writes it: with
+secret.create=false or cloudConfigContents it comes from somewhere else.
+*/ -}}
+{{- if and .Values.secret.enabled .Values.secret.create (not .Values.cloudConfigContents) -}}
+{{- $global := .Values.cloudConfig.global | default dict -}}
+{{- $lb := .Values.loadBalancer -}}
+{{- $extra := .Values.cloudConfig.loadBalancer | default dict -}}
+
+{{- if not (index $global "auth-url") -}}
+{{- fail "cloudConfig.global.auth-url is required: the Keystone URL" -}}
+{{- end -}}
+{{- $password := and (or (index $global "username") (index $global "user-id")) (index $global "password") -}}
+{{- $appCredential := and (or (index $global "application-credential-id") (index $global "application-credential-name")) (index $global "application-credential-secret") -}}
+{{- $trust := and (index $global "trust-id") (index $global "trustee-id") (index $global "trustee-password") -}}
+{{- if not (or $password $appCredential $trust (index $global "token")) -}}
+{{- fail "cloudConfig.global has no credentials: set username (or user-id) with password, application-credential-id (or application-credential-name) with application-credential-secret, a token, or trust-id with trustee-id and trustee-password" -}}
+{{- end -}}
+
+{{- if ne (lower (toString (get $extra "enabled"))) "false" -}}
+{{- if not $lb.rpcServerAddr -}}
+{{- fail "loadBalancer.rpcServerAddr is required: the address of the load balancer service, for example loadbalancer-api.lb-system.svc:8080" -}}
+{{- end -}}
+{{- if hasPrefix "https://" (lower $lb.rpcServerAddr) -}}
+{{- fail "loadBalancer.rpcServerAddr must not start with https://: the load balancer service only serves plaintext HTTP/2, use host:port or http://host:port" -}}
+{{- end -}}
+{{- if not $lb.networkID -}}
+{{- fail "loadBalancer.networkID is required: the network of the workload cluster's nodes, where the load balancers are created" -}}
+{{- end -}}
+{{- if not $lb.subnetID -}}
+{{- fail "loadBalancer.subnetID is required: the subnet of the workload cluster's nodes, where the load balancers are created" -}}
+{{- end -}}
+{{- if and (eq $lb.mode "external") (not $lb.floatingNetworkID) -}}
+{{- fail "loadBalancer.floatingNetworkID is required when loadBalancer.mode is external: floating IPs are allocated from that network" -}}
+{{- end -}}
+{{- end -}}
+
+{{- range $key := list "internal-lb" "rpc-server-addr" "api-key" "tenant-id" "network-id" "subnet-id" "floating-network-id" -}}
+{{- if hasKey $extra $key -}}
+{{- fail (printf "cloudConfig.loadBalancer.%s is set from the loadBalancer values, remove it from cloudConfig" $key) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

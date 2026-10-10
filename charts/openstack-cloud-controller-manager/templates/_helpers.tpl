@@ -100,48 +100,40 @@ Common annotations and pod annotations
 
 
 {{/*
-Create cloud-config makro.
+The lines `key = "value"` of a map, in key order. A key with an empty value is
+left out: the controller treats it like a key that is not set.
+*/}}
+{{- define "occm.keyValues" -}}
+{{- range $key, $value := . }}
+{{- if not (kindIs "invalid" $value) }}
+{{- if ne (toString $value) "" }}
+{{ $key }} = {{ $value | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Create cloud-config makro. The load balancer keys come from the loadBalancer
+values, cloudConfig.loadBalancer adds to them.
 */}}
 {{- define "cloudConfig" -}}
-[Global]
-{{- range $key, $value := .Values.cloudConfig.global }}
-{{ $key }} = {{ $value | quote }}
-{{- end }}
+{{- $lb := .Values.loadBalancer -}}
+{{- $managed := dict "internal-lb" (eq $lb.mode "internal") "rpc-server-addr" $lb.rpcServerAddr "api-key" $lb.apiKey "tenant-id" $lb.tenantID "network-id" $lb.networkID "subnet-id" $lb.subnetID -}}
+{{- if ne $lb.mode "internal" -}}
+{{- $_ := set $managed "floating-network-id" $lb.floatingNetworkID -}}
+{{- end -}}
+[Global]{{ include "occm.keyValues" .Values.cloudConfig.global }}
 
-[Networking]
-{{- range $key, $value := .Values.cloudConfig.networking }}
-{{ $key }} = {{ $value | quote }}
-{{- end }}
+[Networking]{{ include "occm.keyValues" .Values.cloudConfig.networking }}
 
-[LoadBalancer]
-{{- if eq .Values.loadBalancer.mode "internal" }}
-internal-lb = "true"
-{{- else }}
-internal-lb = "false"
-{{- with .Values.loadBalancer.floatingNetworkID }}
-floating-network-id = {{ . | quote }}
-{{- end }}
-{{- end }}
-{{- range $key, $value := .Values.cloudConfig.loadBalancer }}
-{{- if not (has $key (list "internal-lb" "floating-network-id")) }}
-{{ $key }} = {{ $value | quote }}
-{{- end }}
-{{- end }}
+[LoadBalancer]{{ include "occm.keyValues" $managed }}{{ include "occm.keyValues" .Values.cloudConfig.loadBalancer }}
 
-[BlockStorage]
-{{- range $key, $value := .Values.cloudConfig.blockStorage }}
-{{ $key }} = {{ $value | quote }}
-{{- end }}
+[BlockStorage]{{ include "occm.keyValues" .Values.cloudConfig.blockStorage }}
 
-[Metadata]
-{{- range $key, $value := .Values.cloudConfig.metadata }}
-{{ $key }} = {{ $value | quote }}
-{{- end }}
+[Metadata]{{ include "occm.keyValues" .Values.cloudConfig.metadata }}
 
-[Route]
-{{- range $key, $value := .Values.cloudConfig.route }}
-{{ $key }} = {{ $value | quote }}
-{{- end }}
+[Route]{{ include "occm.keyValues" .Values.cloudConfig.route }}
 {{- end }}
 
 {{/*
@@ -152,29 +144,8 @@ Generate string of enabled controllers. Might have a trailing comma (,) which ne
 {{- end }}
 
 {{/*
-Path of the kubeconfig of the cluster the controller manages, when it does not run inside that cluster.
+Path of the kubeconfig of the workload cluster in the pod.
 */}}
 {{- define "occm.kubeconfigPath" -}}
 {{- printf "%s/kubeconfig" (trimSuffix "/" .Values.kubeconfig.mountPath) -}}
 {{- end }}
-
-{{/*
-Check the load balancer mode. Only checked when the chart writes cloud.conf: a
-Secret brought along with secret.create=false carries its own settings.
-*/}}
-{{- define "occm.validateLoadBalancer" -}}
-{{- if and .Values.secret.create (not .Values.cloudConfigContents) -}}
-{{- if not (has .Values.loadBalancer.mode (list "external" "internal")) -}}
-{{- fail (printf "loadBalancer.mode must be external or internal, got %q" .Values.loadBalancer.mode) -}}
-{{- end -}}
-{{- $lbDisabled := eq (lower (toString (get (.Values.cloudConfig.loadBalancer | default dict) "enabled"))) "false" -}}
-{{- if and (eq .Values.loadBalancer.mode "external") (not .Values.loadBalancer.floatingNetworkID) (not $lbDisabled) -}}
-{{- fail "loadBalancer.floatingNetworkID is required when loadBalancer.mode is external: floating IPs are allocated from that network" -}}
-{{- end -}}
-{{- range $key := list "internal-lb" "floating-network-id" -}}
-{{- if hasKey ($.Values.cloudConfig.loadBalancer | default dict) $key -}}
-{{- fail (printf "cloudConfig.loadBalancer.%s is set from loadBalancer.mode and loadBalancer.floatingNetworkID, remove it from cloudConfig" $key) -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
