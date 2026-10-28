@@ -1,7 +1,7 @@
 apiVersion: apps/v1
-kind: DaemonSet
+kind: Deployment
 metadata:
-  name: {{ include "occm.name" . }}
+  name: {{ include "occm.fullname" . }}
   labels: {{- include "occm.labels.standard" . | nindent 4 }}
   namespace: {{ .Release.Namespace }}
   annotations:
@@ -12,7 +12,8 @@ spec:
   selector:
     matchLabels:
       {{- include "occm.controllermanager.matchLabels" . | nindent 6 }}
-  updateStrategy:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
     type: RollingUpdate
   template:
     metadata:
@@ -42,7 +43,7 @@ spec:
       hostAliases:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      serviceAccountName: {{ .Values.serviceAccountName }}
+      serviceAccountName: {{ include "occm.serviceAccountName" . }}
       containers:
         - name: openstack-cloud-controller-manager
           image: "{{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}"
@@ -57,6 +58,9 @@ spec:
             - --cluster-name=$(CLUSTER_NAME)
             - --cloud-provider=openstack
             - --use-service-account-credentials=false
+            - --kubeconfig={{ include "occm.kubeconfigPath" . }}
+            - --authentication-kubeconfig={{ include "occm.kubeconfigPath" . }}
+            - --authorization-kubeconfig={{ include "occm.kubeconfigPath" . }}
             - --controllers={{- trimAll "," (include "occm.enabledControllers" . ) -}}
             {{- if .Values.serviceMonitor.enabled }}
             - --authorization-always-allow-paths=/metrics
@@ -72,18 +76,18 @@ spec:
           {{- if .Values.serviceMonitor.enabled }}
           ports:
           - containerPort: 10258
-            hostPort: 10258
             name: http
             protocol: TCP
           {{- end }}
-          {{- if or (.Values.extraVolumeMounts) (.Values.secret.enabled) }}
           volumeMounts:
-          {{- end }}
           {{- if .Values.secret.enabled }}
             - mountPath: /etc/config
               name: cloud-config-volume
               readOnly: true
           {{- end }}
+            - mountPath: {{ .Values.kubeconfig.mountPath }}
+              name: kubeconfig-volume
+              readOnly: true
           {{- if .Values.extraVolumeMounts }}
             {{- toYaml .Values.extraVolumeMounts | nindent 12 }}
           {{- end }}
@@ -103,7 +107,7 @@ spec:
             - name: CLOUD_CONFIG
               value: /etc/config/cloud.conf
             - name: CLUSTER_NAME
-              value: {{ .Values.cluster.name }}
+              value: {{ include "occm.clusterName" . | quote }}
             {{- if .Values.extraEnv }}
               {{- toYaml .Values.extraEnv | nindent 12 }}
             {{- end }}
@@ -116,14 +120,18 @@ spec:
       priorityClassName: {{ .Values.priorityClassName }}
       {{- end }}
 
-      {{- if or (.Values.extraVolumes) (.Values.secret.enabled) }}
       volumes:
-      {{- end }}
       {{- if .Values.secret.enabled }}
       - name: cloud-config-volume
         secret:
-          secretName: {{ .Values.secret.name }}
+          secretName: {{ include "occm.secretName" . }}
       {{- end }}
+      - name: kubeconfig-volume
+        secret:
+          secretName: {{ include "occm.kubeconfigSecretName" . }}
+          items:
+            - key: {{ .Values.kubeconfig.secretKey }}
+              path: kubeconfig
       {{- if .Values.extraVolumes }}
         {{ toYaml .Values.extraVolumes | nindent 6 }}
       {{- end }}
