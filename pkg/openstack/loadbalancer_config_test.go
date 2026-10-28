@@ -44,6 +44,7 @@ func TestReadConfigLoadBalancerService(t *testing.T) {
  rpc-timeout = 45s
  rpc-retry-max = 5
  tenant-id = 0f1e2d3c4b5a69788796a5b4c3d2e1f0
+ datacenter-uuid = 88888888-8888-4888-8888-888888888888
  vpc-cidr = 10.0.0.0/16
  security-group-ids = 55555555-5555-4555-8555-555555555555,66666666-6666-4666-8666-666666666666
  qos-policy-id = 77777777-7777-4777-8777-777777777777
@@ -59,6 +60,7 @@ func TestReadConfigLoadBalancerService(t *testing.T) {
 	assert.Equal(t, 45*time.Second, lb.RPCTimeout.Duration)
 	assert.Equal(t, 5, lb.RPCRetryMax)
 	assert.Equal(t, "0f1e2d3c4b5a69788796a5b4c3d2e1f0", lb.TenantID)
+	assert.Equal(t, "88888888-8888-4888-8888-888888888888", lb.DatacenterUUID)
 	assert.Equal(t, "10.0.0.0/16", lb.VPCCIDR)
 	assert.Equal(t, "55555555-5555-4555-8555-555555555555,66666666-6666-4666-8666-666666666666", lb.SecurityGroupIDs)
 	assert.Equal(t, "77777777-7777-4777-8777-777777777777", lb.QoSPolicyID)
@@ -83,6 +85,14 @@ func TestReadConfigLoadBalancerDefaults(t *testing.T) {
 	assert.Equal(t, 3*time.Second, lb.MonitorTimeout.Duration)
 	assert.Equal(t, "ROUND_ROBIN", lb.LBMethod)
 	assert.Empty(t, ignoredLoadBalancerOpts(cfg))
+}
+
+func TestCheckDatacenterUUID(t *testing.T) {
+	assert.NoError(t, checkDatacenterUUID("88888888-8888-4888-8888-888888888888"))
+	assert.NoError(t, checkDatacenterUUID("ABCDEF01-2345-4678-89AB-CDEF01234567"))
+	assert.ErrorContains(t, checkDatacenterUUID(""), "datacenter-uuid is not set")
+	assert.ErrorContains(t, checkDatacenterUUID("not-a-uuid"), "is not a UUID")
+	assert.ErrorContains(t, checkDatacenterUUID("88888888888848888888888888888888"), "is not a UUID", "the service requires dashes")
 }
 
 func TestIgnoredLoadBalancerOpts(t *testing.T) {

@@ -1,0 +1,99 @@
+name: publish
+
+on:
+  push:
+    tags: [ 'v*.*.*' ]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log into registry ${{ env.REGISTRY }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The image tag is the git tag as it is. type=semver is deliberately not
+      # used: it ignores `pattern` for pre-release tags (v0.1.0-ac parses as
+      # 0.1.0 pre-release "ac"), which drops the leading v and the -ubi suffix.
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          labels: |
+            name="OpenStack Cloud Controller Manager"
+            maintainer=Appscode
+            vendor=Appscode
+            version={{tag}}
+            release={{tag}}
+            summary=Cloud Controller Manager for OpenStack
+            description=Kubernetes cloud-controller-manager for OpenStack with the kontainercloud load balancer service
+
+      - name: Build and push
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          file: Dockerfile
+          target: openstack-cloud-controller-manager
+          context: .
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Extract Docker metadata for UBI image
+        id: ubi
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
+            suffix=-ubi
+          labels: |
+            name="OpenStack Cloud Controller Manager"
+            maintainer=Appscode
+            vendor=Appscode
+            version={{tag}}
+            release={{tag}}
+            summary=Cloud Controller Manager for OpenStack
+            description=Kubernetes cloud-controller-manager for OpenStack with the kontainercloud load balancer service
+
+      - name: Build and push UBI image
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          file: Dockerfile.ubi
+          context: .
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          push: true
+          tags: ${{ steps.ubi.outputs.tags }}
+          labels: ${{ steps.ubi.outputs.labels }}

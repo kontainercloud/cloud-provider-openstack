@@ -18,14 +18,15 @@ and must be set:
 | `cloudConfig.global.auth-url` | Keystone URL |
 | `cloudConfig.global` credentials | `username` with `password`, or `application-credential-id` with `application-credential-secret` (`user-id`, `application-credential-name`, `token` and trust credentials work too) |
 | `loadBalancer.rpcServerAddr` | Address of the load balancer service: `host:port` or `http://host:port`, for example `loadbalancer-api.lb-system.svc:8080` |
+| `loadBalancer.datacenterUUID` | UUID of the datacenter whose load balancer controller manages the load balancers; fixed when a load balancer is created |
 | `loadBalancer.networkID` | Network of the workload cluster's nodes, where the load balancers are created |
 | `loadBalancer.subnetID` | Subnet of the workload cluster's nodes |
 | `loadBalancer.floatingNetworkID` | External network floating IPs are allocated from; only for `loadBalancer.mode: external` (the default) |
 
 Optional: `loadBalancer.apiKey` (when the load balancer service requires one),
 `loadBalancer.tenantID` (defaults to the project of the credentials),
-`loadBalancer.mode`, and `cloudConfig.global.region`. All IDs are UUIDs in lower
-case. Cluster API reports the network and subnet of a CAPO cluster in the
+`loadBalancer.mode`, and `cloudConfig.global.region`. All IDs are UUIDs, in lower
+case except the datacenter UUID. Cluster API reports the network and subnet of a CAPO cluster in the
 status of its `OpenStackCluster`.
 
 ```yaml
@@ -39,6 +40,7 @@ cloudConfig:
 loadBalancer:
   mode: external
   rpcServerAddr: loadbalancer-api.lb-system.svc:8080
+  datacenterUUID: 88888888-8888-4888-8888-888888888888
   networkID: 11111111-1111-4111-8111-111111111111
   subnetID: 22222222-2222-4222-8222-222222222222
   floatingNetworkID: 33333333-3333-4333-8333-333333333333
@@ -65,6 +67,7 @@ What the defaults give you:
 
 | Item | Default | Value to change it |
 | --- | --- | --- |
+| Image | `ghcr.io/kontainercloud/cloud-provider-openstack`, tag of the chart's `appVersion`; the CI publishes `<git tag>` and `<git tag>-ubi` | `image.repository`, `image.tag` |
 | Workload | a `Deployment` with one pod, named after the release | `replicaCount`, `fullnameOverride` |
 | Managed cluster | the release name, used for `--cluster-name` and so for load balancer names | `cluster.name` |
 | Kubeconfig | Secret `<cluster>-kubeconfig`, key `value`, created by Cluster API | `kubeconfig.secretName`, `kubeconfig.secretKey` |

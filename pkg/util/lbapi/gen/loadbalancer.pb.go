@@ -1413,6 +1413,10 @@ type LoadBalancerSpec struct {
 	NetworkId string                 `protobuf:"bytes,2,opt,name=network_id,json=networkId,proto3" json:"network_id,omitempty"`
 	SubnetId  string                 `protobuf:"bytes,3,opt,name=subnet_id,json=subnetId,proto3" json:"subnet_id,omitempty"`
 	// listeners defines the set of ports and protocols this LB listens on.
+	//
+	// May be empty. A load balancer with no listeners still gets its VIP (and
+	// floating IP, security groups and QoS), but serves nothing: no Envoy
+	// configuration is generated for it until a listener is added.
 	Listeners []*Listener `protobuf:"bytes,4,rep,name=listeners,proto3" json:"listeners,omitempty"`
 	// client_conn_limit is the maximum number of simultaneous client connections.
 	// 0 means unlimited (use the platform default, e.g. 1000).
@@ -1437,9 +1441,18 @@ type LoadBalancerSpec struct {
 	// destinations inside this range. Leave it empty when every backend shares
 	// the load balancer's subnet; set it when backends live in other subnets of
 	// the VPC, including subnets added after the LB was created.
-	VpcCidr       string `protobuf:"bytes,16,opt,name=vpc_cidr,json=vpcCidr,proto3" json:"vpc_cidr,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	VpcCidr string `protobuf:"bytes,16,opt,name=vpc_cidr,json=vpcCidr,proto3" json:"vpc_cidr,omitempty"`
+	// datacenter_uuid is the datacenter whose loadbalancer-controller builds and
+	// manages this load balancer. Each datacenter runs its own controller against
+	// this shared API, and a controller only acts on load balancers carrying its
+	// own datacenter's uuid.
+	//
+	// Required, and fixed at creation: it is not part of UpdateLoadBalancerRequest.
+	// A plain string with a uuid rule rejects the empty value, which is what makes
+	// it mandatory.
+	DatacenterUuid string `protobuf:"bytes,17,opt,name=datacenter_uuid,json=datacenterUuid,proto3" json:"datacenter_uuid,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *LoadBalancerSpec) Reset() {
@@ -1542,6 +1555,13 @@ func (x *LoadBalancerSpec) GetVpcCidr() string {
 	return ""
 }
 
+func (x *LoadBalancerSpec) GetDatacenterUuid() string {
+	if x != nil {
+		return x.DatacenterUuid
+	}
+	return ""
+}
+
 // LoadBalancerSummary is the lightweight representation used in list responses.
 type LoadBalancerSummary struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -1567,8 +1587,11 @@ type LoadBalancerSummary struct {
 	// QoS policy fields.
 	QosPolicyDisabled bool   `protobuf:"varint,22,opt,name=qos_policy_disabled,json=qosPolicyDisabled,proto3" json:"qos_policy_disabled,omitempty"`
 	QosPolicyId       string `protobuf:"bytes,23,opt,name=qos_policy_id,json=qosPolicyId,proto3" json:"qos_policy_id,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// datacenter_uuid is the datacenter this load balancer belongs to. Read-only:
+	// it is fixed when the load balancer is created.
+	DatacenterUuid string `protobuf:"bytes,25,opt,name=datacenter_uuid,json=datacenterUuid,proto3" json:"datacenter_uuid,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *LoadBalancerSummary) Reset() {
@@ -1709,6 +1732,13 @@ func (x *LoadBalancerSummary) GetQosPolicyDisabled() bool {
 func (x *LoadBalancerSummary) GetQosPolicyId() string {
 	if x != nil {
 		return x.QosPolicyId
+	}
+	return ""
+}
+
+func (x *LoadBalancerSummary) GetDatacenterUuid() string {
+	if x != nil {
+		return x.DatacenterUuid
 	}
 	return ""
 }
@@ -2715,6 +2745,10 @@ type UpdateLoadBalancerRequest struct {
 	//
 	// Use the Listener and Rule RPCs to change one listener or rule without
 	// resending the whole set.
+	//
+	// A repeated field cannot tell "omitted" from "sent empty", so an empty list
+	// leaves the listeners untouched. To remove every listener, use
+	// DeleteListeners with all of their ids.
 	Listeners []*Listener `protobuf:"bytes,2,rep,name=listeners,proto3" json:"listeners,omitempty"`
 	// --- Traffic shaping ---
 	ClientConnLimit       *int32   `protobuf:"varint,9,opt,name=client_conn_limit,json=clientConnLimit,proto3,oneof" json:"client_conn_limit,omitempty"`
@@ -4233,24 +4267,24 @@ const file_pkg_util_lbapi_proto_loadbalancer_proto_rawDesc = "" +
 	"\rl4-no-matches\x123match conditions are only allowed on HTTP listeners\x1a=this.protocol == 3 || this.rules.all(r, size(r.matches) == 0)\x1at\n" +
 	"\x13hostnames-http-only\x12,hostnames are only allowed on HTTP listeners\x1a/this.protocol == 3 || size(this.hostnames) == 0\x1a\xc3\x03\n" +
 	"\x1chttp-health-monitor-required\x12whealth check path, method, and expected status codes are required when protocol is HTTP and a health monitor is enabled\x1a\xa9\x02this.protocol != 3 || this.rules.all(r, !has(r.health_monitor) || (r.health_monitor.http_health_check_path.startsWith('/') && r.health_monitor.http_health_check_method != 0 && size(r.health_monitor.expected_status_codes) > 0 && r.health_monitor.expected_status_codes.all(c, c >= 100 && c <= 599)))J\x04\b\x03\x10\x04J\x04\b\x04\x10\x05J\x04\b\x05\x10\x06J\x04\b\x06\x10\aR\talgorithmR\fbackend_refsR\n" +
-	"http_routeR\x0ehealth_monitor\"\xe6\n" +
-	"\n" +
+	"http_routeR\x0ehealth_monitor\"\x8f\v\n" +
 	"\x10LoadBalancerSpec\x12$\n" +
 	"\ttenant_id\x18\x01 \x01(\tB\a\xbaH\x04r\x02\x10\x01R\btenantId\x12&\n" +
 	"\n" +
 	"network_id\x18\x02 \x01(\tB\a\xbaH\x04r\x02\x10\x01R\tnetworkId\x12$\n" +
-	"\tsubnet_id\x18\x03 \x01(\tB\a\xbaH\x04r\x02\x10\x01R\bsubnetId\x12A\n" +
-	"\tlisteners\x18\x04 \x03(\v2\x19.loadbalancer.v1.ListenerB\b\xbaH\x05\x92\x01\x02\b\x01R\tlisteners\x123\n" +
+	"\tsubnet_id\x18\x03 \x01(\tB\a\xbaH\x04r\x02\x10\x01R\bsubnetId\x127\n" +
+	"\tlisteners\x18\x04 \x03(\v2\x19.loadbalancer.v1.ListenerR\tlisteners\x123\n" +
 	"\x11client_conn_limit\x18\x06 \x01(\x05B\a\xbaH\x04\x1a\x02(\x00R\x0fclientConnLimit\x126\n" +
 	"\x17security_group_disabled\x18\v \x01(\bR\x15securityGroupDisabled\x12\x80\x01\n" +
 	"\x12security_group_ids\x18\x0f \x03(\tBR\xbaHO\x92\x01L\x10\n" +
 	"\x18\x01\"FrD2B^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$R\x10securityGroupIds\x12.\n" +
 	"\x13qos_policy_disabled\x18\r \x01(\bR\x11qosPolicyDisabled\x12\"\n" +
 	"\rqos_policy_id\x18\x0e \x01(\tR\vqosPolicyId\x12\x19\n" +
-	"\bvpc_cidr\x18\x10 \x01(\tR\avpcCidr:\xa2\x06\xbaH\x9e\x06\x1a\x8a\x03\n" +
+	"\bvpc_cidr\x18\x10 \x01(\tR\avpcCidr\x121\n" +
+	"\x0fdatacenter_uuid\x18\x11 \x01(\tB\b\xbaH\x05r\x03\xb0\x01\x01R\x0edatacenterUuid:\xa2\x06\xbaH\x9e\x06\x1a\x8a\x03\n" +
 	"\x13spec-id-uuid-format\x12Stenant_id, network_id, and subnet_id must be valid UUIDs (hex with optional dashes)\x1a\x9d\x02this.tenant_id.matches('^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$') && this.network_id.matches('^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$') && this.subnet_id.matches('^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$')\x1a\xd4\x01\n" +
 	"\x15qos-policy-validation\x12=qos_policy_id must be a valid UUID when QoS policy is enabled\x1a|this.qos_policy_disabled || this.qos_policy_id.matches('^[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}$')\x1a\xb7\x01\n" +
-	"\x0fvpc-cidr-format\x12;vpc_cidr must be an IPv4 CIDR such as 10.0.0.0/16, or empty\x1agthis.vpc_cidr == '' || this.vpc_cidr.matches('^([0-9]{1,3}[.]){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$')J\x04\b\f\x10\rR\x11security_group_id\"\xa4\x05\n" +
+	"\x0fvpc-cidr-format\x12;vpc_cidr must be an IPv4 CIDR such as 10.0.0.0/16, or empty\x1agthis.vpc_cidr == '' || this.vpc_cidr.matches('^([0-9]{1,3}[.]){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$')J\x04\b\f\x10\rR\x11security_group_id\"\xcd\x05\n" +
 	"\x13LoadBalancerSummary\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x0e\n" +
@@ -4270,7 +4304,8 @@ const file_pkg_util_lbapi_proto_loadbalancer_proto_rawDesc = "" +
 	"\x17security_group_disabled\x18\x14 \x01(\bR\x15securityGroupDisabled\x12,\n" +
 	"\x12security_group_ids\x18\x18 \x03(\tR\x10securityGroupIds\x12.\n" +
 	"\x13qos_policy_disabled\x18\x16 \x01(\bR\x11qosPolicyDisabled\x12\"\n" +
-	"\rqos_policy_id\x18\x17 \x01(\tR\vqosPolicyIdJ\x04\b\x15\x10\x16R\x11security_group_id\"\x97\x05\n" +
+	"\rqos_policy_id\x18\x17 \x01(\tR\vqosPolicyId\x12'\n" +
+	"\x0fdatacenter_uuid\x18\x19 \x01(\tR\x0edatacenterUuidJ\x04\b\x15\x10\x16R\x11security_group_id\"\x97\x05\n" +
 	"\fLoadBalancer\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x0e\n" +

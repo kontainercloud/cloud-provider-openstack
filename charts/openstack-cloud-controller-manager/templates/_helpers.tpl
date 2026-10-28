@@ -119,7 +119,7 @@ values, cloudConfig.loadBalancer adds to them.
 */}}
 {{- define "cloudConfig" -}}
 {{- $lb := .Values.loadBalancer -}}
-{{- $managed := dict "internal-lb" (eq $lb.mode "internal") "rpc-server-addr" $lb.rpcServerAddr "api-key" $lb.apiKey "tenant-id" $lb.tenantID "network-id" $lb.networkID "subnet-id" $lb.subnetID -}}
+{{- $managed := dict "internal-lb" (eq $lb.mode "internal") "rpc-server-addr" $lb.rpcServerAddr "api-key" $lb.apiKey "tenant-id" $lb.tenantID "datacenter-uuid" $lb.datacenterUUID "network-id" $lb.networkID "subnet-id" $lb.subnetID -}}
 {{- if ne $lb.mode "internal" -}}
 {{- $_ := set $managed "floating-network-id" $lb.floatingNetworkID -}}
 {{- end -}}

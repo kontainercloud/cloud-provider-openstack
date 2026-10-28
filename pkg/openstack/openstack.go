@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -98,6 +99,7 @@ type LoadBalancerOpts struct {
 	RPCTimeout       util.MyDuration `gcfg:"rpc-timeout"`        // deadline of a single RPC attempt
 	RPCRetryMax      int             `gcfg:"rpc-retry-max"`      // retries of an RPC that failed with a transient error
 	TenantID         string          `gcfg:"tenant-id"`          // overrides the project of the credentials in the [Global] section
+	DatacenterUUID   string          `gcfg:"datacenter-uuid"`    // datacenter whose load balancer controller manages the load balancers, fixed at creation
 	VPCCIDR          string          `gcfg:"vpc-cidr"`           // address range of the VPC, needed when nodes are in other subnets than the load balancer
 	SecurityGroupIDs string          `gcfg:"security-group-ids"` // comma separated, applied to the load balancer's ports. Port security is disabled when empty
 	QoSPolicyID      string          `gcfg:"qos-policy-id"`      // QoS policy applied to the load balancer's ports. No QoS policy when empty
@@ -420,6 +422,11 @@ func (os *OpenStack) LoadBalancer() (cloudprovider.LoadBalancer, bool) {
 		return nil, false
 	}
 
+	if err := checkDatacenterUUID(os.lbOpts.DatacenterUUID); err != nil {
+		klog.Fatalf("Config error: %v", err)
+		return nil, false
+	}
+
 	// External load balancers always get a floating IP; without a network to
 	// allocate it from none of them could be provisioned.
 	if !os.lbOpts.InternalLB && os.lbOpts.FloatingNetworkID == "" {
@@ -458,6 +465,21 @@ func (os *OpenStack) LoadBalancer() (cloudprovider.LoadBalancer, bool) {
 		kclient:       os.kclient,
 		eventRecorder: os.eventRecorder,
 	}}, true
+}
+
+// datacenterUUIDRegexp is the dashed form the load balancer service accepts.
+var datacenterUUIDRegexp = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// checkDatacenterUUID checks the datacenter-uuid option. The load balancer
+// service rejects every create without a valid one, so fail at startup.
+func checkDatacenterUUID(id string) error {
+	if id == "" {
+		return fmt.Errorf("datacenter-uuid is not set in the [LoadBalancer] section, the datacenter that manages the load balancers is required")
+	}
+	if !datacenterUUIDRegexp.MatchString(id) {
+		return fmt.Errorf("datacenter-uuid %q in the [LoadBalancer] section is not a UUID", id)
+	}
+	return nil
 }
 
 // checkLoadBalancerService probes the load balancer service once so that a

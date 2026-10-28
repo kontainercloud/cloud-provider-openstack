@@ -48,6 +48,10 @@ loadBalancer:
   # Project the load balancers are created in, a UUID. Defaults to the project of
   # the cloudConfig.global credentials.
   tenantID: ""
+  # Datacenter whose load balancer controller builds and manages the load
+  # balancers, a UUID with dashes. Required; it is fixed when a load balancer
+  # is created.
+  datacenterUUID: ""
   # Network and subnet of the workload cluster's nodes, where the load
   # balancers are created. Required, UUIDs. Cluster API reports both in the
   # status of the OpenStackCluster.
@@ -88,8 +92,8 @@ imagePullSecrets: []
 
 # Image repository name and tag
 image:
-  repository: registry.k8s.io/provider-os/openstack-cloud-controller-manager
-  tag: ""
+  repository: ghcr.io/kontainercloud/cloud-provider-openstack
+  tag: "v0.2.0-ac"
 
 # Additional containers which are run before the app containers are started.
 extraInitContainers: []

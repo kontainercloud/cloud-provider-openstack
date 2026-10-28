@@ -1385,6 +1385,7 @@ const (
 	testNetworkID         = "11111111-1111-4111-8111-111111111111"
 	testSubnetID          = "22222222-2222-4222-8222-222222222222"
 	testFloatingNetworkID = "33333333-3333-4333-8333-333333333333"
+	testDatacenterUUID    = "88888888-8888-4888-8888-888888888888"
 	testServiceUID        = "44444444-4444-4444-8444-444444444444"
 	testLBClusterName     = "kubernetes"
 	testLBName            = "kube_service_kubernetes_default_web"
@@ -1457,6 +1458,7 @@ func newTestLbaas(t *testing.T, client *fakeLBClient, service *corev1.Service) (
 			NetworkID:             testNetworkID,
 			SubnetID:              testSubnetID,
 			FloatingNetworkID:     testFloatingNetworkID,
+			DatacenterUUID:        testDatacenterUUID,
 			LBMethod:              "ROUND_ROBIN",
 			CreateMonitor:         true,
 			MonitorDelay:          util.MyDuration{Duration: 5 * time.Second},
@@ -1746,6 +1748,7 @@ func TestEnsureLoadBalancerCreates(t *testing.T) {
 	assert.Equal(t, testTenantID, req.Spec.TenantId)
 	assert.Equal(t, testNetworkID, req.Spec.NetworkId)
 	assert.Equal(t, testSubnetID, req.Spec.SubnetId)
+	assert.Equal(t, testDatacenterUUID, req.Spec.DatacenterUuid)
 	assert.True(t, req.Spec.SecurityGroupDisabled)
 	assert.True(t, req.Spec.QosPolicyDisabled)
 	assert.Len(t, req.Spec.Listeners, 2)

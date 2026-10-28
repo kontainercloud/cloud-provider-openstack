@@ -205,6 +205,8 @@ nodes' addresses and node ports.
   Retries of a call that failed with a transient error. Default: 3
 * `tenant-id`
   Project the load balancers are created in. Defaults to the project the `[Global]` credentials are scoped to.
+* `datacenter-uuid`
+  Required. UUID, with dashes, of the datacenter whose load balancer controller builds and manages the load balancers. It is sent when a load balancer is created and cannot be changed afterwards, so load balancers that exist keep the datacenter they were created with. The controller does not start without it.
 
 #### Networks
 

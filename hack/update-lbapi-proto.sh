@@ -23,6 +23,10 @@
 # installed system-wide. Network access is needed for the tools and for the
 # buf.build/bufbuild/protovalidate module the proto imports.
 #
+# Last synced from loadbalancer-api tag v0.2.0-ac. Read the proto from the tag
+# (git show <tag>:proto/loadbalancer/v1/loadbalancer.proto), not from a working
+# tree that may carry uncommitted changes.
+#
 # Usage:
 #   hack/update-lbapi-proto.sh [path/to/loadbalancer.proto]
 

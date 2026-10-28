@@ -28,6 +28,9 @@ secret.create=false or cloudConfigContents it comes from somewhere else.
 {{- if hasPrefix "https://" (lower $lb.rpcServerAddr) -}}
 {{- fail "loadBalancer.rpcServerAddr must not start with https://: the load balancer service only serves plaintext HTTP/2, use host:port or http://host:port" -}}
 {{- end -}}
+{{- if not $lb.datacenterUUID -}}
+{{- fail "loadBalancer.datacenterUUID is required: the UUID of the datacenter whose load balancer controller manages the load balancers" -}}
+{{- end -}}
 {{- if not $lb.networkID -}}
 {{- fail "loadBalancer.networkID is required: the network of the workload cluster's nodes, where the load balancers are created" -}}
 {{- end -}}
@@ -39,7 +42,7 @@ secret.create=false or cloudConfigContents it comes from somewhere else.
 {{- end -}}
 {{- end -}}
 
-{{- range $key := list "internal-lb" "rpc-server-addr" "api-key" "tenant-id" "network-id" "subnet-id" "floating-network-id" -}}
+{{- range $key := list "internal-lb" "rpc-server-addr" "api-key" "tenant-id" "datacenter-uuid" "network-id" "subnet-id" "floating-network-id" -}}
 {{- if hasKey $extra $key -}}
 {{- fail (printf "cloudConfig.loadBalancer.%s is set from the loadBalancer values, remove it from cloudConfig" $key) -}}
 {{- end -}}

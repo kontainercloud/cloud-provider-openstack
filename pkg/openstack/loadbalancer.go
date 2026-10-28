@@ -653,6 +653,7 @@ func (lbaas *LbaasV2) buildLoadBalancerSpec(service *corev1.Service, nodes []*co
 		QosPolicyDisabled:     lbaas.opts.QoSPolicyID == "",
 		QosPolicyId:           lbaas.opts.QoSPolicyID,
 		VpcCidr:               lbaas.opts.VPCCIDR,
+		DatacenterUuid:        lbaas.opts.DatacenterUUID,
 	}, nil
 }
 

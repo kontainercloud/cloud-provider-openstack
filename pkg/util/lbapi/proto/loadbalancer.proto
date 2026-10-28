@@ -487,7 +487,11 @@ message LoadBalancerSpec {
   string network_id = 2 [(buf.validate.field).string.min_len = 1];
   string subnet_id = 3 [(buf.validate.field).string.min_len = 1];
   // listeners defines the set of ports and protocols this LB listens on.
-  repeated Listener listeners = 4 [(buf.validate.field).repeated.min_items = 1];
+  //
+  // May be empty. A load balancer with no listeners still gets its VIP (and
+  // floating IP, security groups and QoS), but serves nothing: no Envoy
+  // configuration is generated for it until a listener is added.
+  repeated Listener listeners = 4;
   // client_conn_limit is the maximum number of simultaneous client connections.
   // 0 means unlimited (use the platform default, e.g. 1000).
   int32 client_conn_limit = 6 [(buf.validate.field).int32.gte = 0];
@@ -520,6 +524,16 @@ message LoadBalancerSpec {
   // the load balancer's subnet; set it when backends live in other subnets of
   // the VPC, including subnets added after the LB was created.
   string vpc_cidr = 16;
+
+  // datacenter_uuid is the datacenter whose loadbalancer-controller builds and
+  // manages this load balancer. Each datacenter runs its own controller against
+  // this shared API, and a controller only acts on load balancers carrying its
+  // own datacenter's uuid.
+  //
+  // Required, and fixed at creation: it is not part of UpdateLoadBalancerRequest.
+  // A plain string with a uuid rule rejects the empty value, which is what makes
+  // it mandatory.
+  string datacenter_uuid = 17 [(buf.validate.field).string.uuid = true];
 
   option (buf.validate.message).cel = {
     id: "spec-id-uuid-format"
@@ -567,6 +581,9 @@ message LoadBalancerSummary {
   // QoS policy fields.
   bool qos_policy_disabled = 22;
   string qos_policy_id = 23;
+  // datacenter_uuid is the datacenter this load balancer belongs to. Read-only:
+  // it is fixed when the load balancer is created.
+  string datacenter_uuid = 25;
 }
 
 // LoadBalancer is the full representation including spec and error details.
@@ -735,6 +752,10 @@ message UpdateLoadBalancerRequest {
   //
   // Use the Listener and Rule RPCs to change one listener or rule without
   // resending the whole set.
+  //
+  // A repeated field cannot tell "omitted" from "sent empty", so an empty list
+  // leaves the listeners untouched. To remove every listener, use
+  // DeleteListeners with all of their ids.
   repeated Listener listeners = 2;
 
   // --- Traffic shaping ---

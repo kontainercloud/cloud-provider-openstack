@@ -34,6 +34,7 @@ occm_values=(
   --set-string cloudConfig.global.application-credential-id=app-credential-id
   --set-string cloudConfig.global.application-credential-secret=app-credential-secret
   --set-string loadBalancer.rpcServerAddr=loadbalancer-api.lb-system.svc:8080
+  --set-string loadBalancer.datacenterUUID=88888888-8888-4888-8888-888888888888
   --set-string loadBalancer.networkID=11111111-1111-4111-8111-111111111111
   --set-string loadBalancer.subnetID=22222222-2222-4222-8222-222222222222
 )
