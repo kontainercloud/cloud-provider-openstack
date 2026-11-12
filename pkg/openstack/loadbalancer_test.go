@@ -1552,15 +1552,15 @@ func TestCheckServicePorts(t *testing.T) {
 
 func TestBuildEndpoints(t *testing.T) {
 	port := corev1.ServicePort{Port: 80, NodePort: 30080}
-	nodes := newTestNodes("10.0.0.12", "10.0.0.11", "169.254.10.1", "10.0.0.11")
-	nodes = append(nodes, &corev1.Node{ObjectMeta: v1.ObjectMeta{Name: "no-address"}})
+	nodes := newTestNodes("10.0.0.12", "10.0.0.11", "10.0.0.11")
 
-	got := buildEndpoints(port, nodes, &serviceConfig{})
+	got, err := buildEndpoints(port, nodes, &serviceConfig{})
+	require.NoError(t, err)
 
 	assert.Equal(t, []*lbv1.BackendRef{
 		{Ip: "10.0.0.11", Port: 30080},
 		{Ip: "10.0.0.12", Port: 30080},
-	}, got, "endpoints are sorted, deduplicated and without unroutable addresses")
+	}, got, "endpoints are sorted and deduplicated")
 }
 
 func TestBuildListeners(t *testing.T) {
@@ -2454,4 +2454,48 @@ func TestEnsureLoadBalancerSwitchesToHTTP(t *testing.T) {
 	assert.Equal(t, lbv1.Protocol_PROTOCOL_HTTP, http.Protocol)
 	assert.Empty(t, http.Id, "the TCP listener is replaced, not changed in place")
 	assert.NotEmpty(t, client.updateReqs[0].Listeners[1].Id, "the UDP listener is kept")
+}
+
+// A node can be registered before its IP is published. Both the node sync
+// and its Service-queue retry must fail without changing the applied hash.
+func TestLoadBalancerRetriesPendingNodeAddress(t *testing.T) {
+	for _, address := range []string{"", "169.254.1.1", "fe80::1", "2001:db8::12"} {
+		t.Run(address, func(t *testing.T) {
+			ctx := context.Background()
+			client := newFakeLBClient()
+			svc := newTestService()
+			svc.Spec.IPFamilies = []corev1.IPFamily{corev1.IPv4Protocol}
+			lbaas, kclient := newTestLbaas(t, client, svc)
+			_, err := lbaas.EnsureLoadBalancer(ctx, testLBClusterName, svc, newTestNodes("10.0.0.11"))
+			require.NoError(t, err)
+			stored, err := kclient.CoreV1().Services(svc.Namespace).Get(ctx, svc.Name, v1.GetOptions{})
+			require.NoError(t, err)
+			hash := stored.Annotations[ServiceAnnotationLoadBalancerConfigHash]
+			nodes := newTestNodes("10.0.0.11", address)
+			if address == "" {
+				nodes[1].Status.Addresses = nil
+			}
+			require.ErrorContains(t, lbaas.UpdateLoadBalancer(ctx, testLBClusterName, stored, nodes), "node-1")
+			_, err = lbaas.EnsureLoadBalancer(ctx, testLBClusterName, stored, nodes)
+			require.ErrorContains(t, err, "node-1")
+			assert.Empty(t, client.updateReqs, "a partial backend list must never be applied")
+			assert.Equal(t, hash, storedAnnotations(t, kclient)[ServiceAnnotationLoadBalancerConfigHash])
+
+			// The retry gets the same nodes, with only Status.Addresses changed.
+			nodes[1].Status.Addresses = []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "10.0.0.12"}}
+			_, err = lbaas.EnsureLoadBalancer(ctx, testLBClusterName, stored, nodes)
+			require.NoError(t, err)
+			require.Len(t, client.updateReqs, 1)
+			for _, listener := range client.updateReqs[0].Listeners {
+				assert.Len(t, listener.Rules[0].Backends[0].Endpoints, 2)
+			}
+			stored, err = kclient.CoreV1().Services(svc.Namespace).Get(ctx, svc.Name, v1.GetOptions{})
+			require.NoError(t, err)
+			require.NoError(t, lbaas.UpdateLoadBalancer(ctx, testLBClusterName, stored, nodes))
+			require.Len(t, client.updateReqs, 1, "the successful retry must record the new hash")
+			require.NoError(t, lbaas.UpdateLoadBalancer(ctx, testLBClusterName, stored, nodes[:1]))
+			require.Len(t, client.updateReqs, 2)
+			assert.Len(t, client.updateReqs[1].Listeners[0].Rules[0].Backends[0].Endpoints, 1, "node removal still reconciles")
+		})
+	}
 }

@@ -524,19 +524,19 @@ func isUsableNodeIP(address string) bool {
 // and ordered: the API rejects a backend that lists the same ip:port twice, and
 // a stable order keeps the configuration from changing just because the node
 // list came back in a different sequence.
-func buildEndpoints(port corev1.ServicePort, nodes []*corev1.Node, svcConf *serviceConfig) []*lbv1.BackendRef {
+func buildEndpoints(port corev1.ServicePort, nodes []*corev1.Node, svcConf *serviceConfig) ([]*lbv1.BackendRef, error) {
 	seen := make(map[string]struct{}, len(nodes))
 	endpoints := make([]*lbv1.BackendRef, 0, len(nodes))
 	for _, node := range nodes {
 		addr, err := nodeAddressForLB(node, svcConf.preferredIPFamily)
 		if err != nil {
-			// Node failure, do not create member
-			klog.Warningf("Failed to get the address of node %s for creating member of load balancer port %d: %v", node.Name, port.Port, err)
-			continue
+			// Address publication can lag node registration. Returning an error
+			// keeps the Service queued until every supplied node is resolved;
+			// address-only node updates do not trigger the service controller.
+			return nil, fmt.Errorf("no usable node address found for node %s, load balancer port %d: %w", node.Name, port.Port, err)
 		}
 		if !isUsableNodeIP(addr) {
-			klog.Warningf("Skipping node %s for load balancer port %d: address %q is not routable", node.Name, port.Port, addr)
-			continue
+			return nil, fmt.Errorf("no usable node address found for node %s, load balancer port %d: address %q is not routable", node.Name, port.Port, addr)
 		}
 		if _, dup := seen[addr]; dup {
 			continue
@@ -549,7 +549,7 @@ func buildEndpoints(port corev1.ServicePort, nodes []*corev1.Node, svcConf *serv
 		return endpoints[i].GetIp() < endpoints[j].GetIp()
 	})
 
-	return endpoints
+	return endpoints, nil
 }
 
 // buildHealthMonitor returns the health monitor of one listener rule, or nil
@@ -605,7 +605,10 @@ func buildListeners(service *corev1.Service, nodes []*corev1.Node, svcConf *serv
 			return nil, fmt.Errorf("port %d has no node port; Services without node ports are not supported", port.Port)
 		}
 
-		endpoints := buildEndpoints(port, nodes, svcConf)
+		endpoints, err := buildEndpoints(port, nodes, svcConf)
+		if err != nil {
+			return nil, err
+		}
 		if len(endpoints) == 0 {
 			return nil, fmt.Errorf("no usable node address found for port %d", port.Port)
 		}
